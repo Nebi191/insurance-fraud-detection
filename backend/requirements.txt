@@ -1,0 +1,60 @@
+# Backend runtime + training bağımlılıkları — Faz 0'da dondurulmuş sürümler.
+#
+# NEDEN HEPSİ `==` İLE PİNLİ:
+# `models/pipeline.pkl` bir joblib/pickle dosyasıdır ve içinde scikit-learn,
+# numpy, scipy ve lightgbm sınıflarının o anki hâlleri serileşmiştir. Docker
+# imajında farklı bir minor sürüm çözülürse pickle ya `AttributeError` /
+# `ModuleNotFoundError` ile açılmaz ya da (daha kötüsü) sessizce farklı davranır
+# ve deploy çöker. Sürümler `pip freeze` çıktısından birebir alınmıştır —
+# tahmin edilmemiştir.
+#
+# PYTHON SÜRÜMÜ: 3.14.6 (pipeline.pkl bu yorumlayıcıyla üretildi).
+# Dockerfile `python:3.14-slim` tabanını kullanmalı. Daha eski bir Python
+# (ör. 3.11) pickle'ı açmayı deneyebilir ama garanti değildir.
+# Güncel eğitim ortamı bilgisi ayrıca models/metadata.json ->
+# library_versions altında da tutulur.
+
+# --- Model / pipeline (pickle uyumluluğu açısından kritik) ---
+scikit-learn==1.9.0
+lightgbm==4.6.0
+numpy==2.4.6
+scipy==1.18.0
+pandas==3.0.3
+joblib==1.5.3
+
+# --- Explainability ---
+# SHAP çıktısı ham JSON olarak servis edilir; matplotlib BİLEREK yoktur.
+# shap 0.52 matplotlib'i zorunlu bağımlılık olarak istemez, dolayısıyla
+# imaja grafik yığını girmez.
+shap==0.52.0
+
+# --- API (Faz 1) ---
+fastapi==0.139.2
+pydantic==2.13.4
+uvicorn==0.51.0
+starlette==1.3.1
+
+# --- Transitive, ama sürüm sürprizi yaşamamak için açıkça pinli ---
+narwhals==2.24.0          # scikit-learn 1.9 dataframe interchange katmanı
+threadpoolctl==3.6.0      # scikit-learn
+python-dateutil==2.9.0.post0
+tzdata==2026.3
+packaging==26.2
+cloudpickle==3.1.2        # shap
+llvmlite==0.48.0          # shap -> numba
+numba==0.66.0             # shap
+slicer==0.0.8             # shap Explanation nesnesi
+tqdm==4.68.4              # shap
+annotated-types==0.7.0    # pydantic
+annotated-doc==0.0.4      # fastapi
+pydantic_core==2.46.4     # pydantic
+typing_extensions==4.16.0
+typing-inspection==0.4.2
+anyio==4.14.2             # starlette
+h11==0.16.0               # uvicorn
+click==8.4.2              # uvicorn
+idna==3.18
+
+# --- Test bağımlılıkları ---
+# pytest / httpx Faz 1'de backend/tests/ ile birlikte eklenecek. Production
+# imajına test paketi kurulmaz.

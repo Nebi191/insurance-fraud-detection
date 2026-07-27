@@ -1,0 +1,838 @@
+{
+  "model_name": "insurance-fraud-detection",
+  "model_version": "1.0.0",
+  "algorithm": "LightGBM (LGBMClassifier)",
+  "trained_at": "2026-07-27T13:51:37+00:00",
+  "dataset": {
+    "source_file": "insurance_claims.csv",
+    "n_rows": 1000,
+    "n_train": 800,
+    "n_test": 200,
+    "test_size": 0.2,
+    "random_state": 42,
+    "positive_rate_train": 0.2475,
+    "positive_rate_test": 0.245
+  },
+  "metrics": {
+    "train_pr_auc": 0.7890430536517761,
+    "test_pr_auc": 0.6527088560280899,
+    "metric_name": "average_precision_score (PR-AUC)"
+  },
+  "feature_list": {
+    "pipeline_input_order": [
+      "months_as_customer",
+      "age",
+      "policy_state",
+      "policy_csl",
+      "policy_deductable",
+      "policy_annual_premium",
+      "umbrella_limit",
+      "insured_sex",
+      "insured_education_level",
+      "insured_occupation",
+      "insured_hobbies",
+      "insured_relationship",
+      "capital-gains",
+      "capital-loss",
+      "incident_type",
+      "collision_type",
+      "incident_severity",
+      "authorities_contacted",
+      "incident_state",
+      "incident_city",
+      "incident_hour_of_the_day",
+      "number_of_vehicles_involved",
+      "property_damage",
+      "bodily_injuries",
+      "witnesses",
+      "police_report_available",
+      "total_claim_amount",
+      "injury_claim",
+      "property_claim",
+      "vehicle_claim",
+      "auto_make",
+      "auto_year",
+      "incident_year",
+      "policy_bind_year"
+    ],
+    "pipeline_input_order_description": "pipeline.predict_proba()'ya verilecek DataFrame'in kolon adları ve sırası. Ham CSV şeması DEĞİLDİR: preprocessing_contract.caller_must_apply_before_predict adımları uygulandıktan SONRAKİ şemadır.",
+    "categorical_features": [
+      "policy_state",
+      "policy_csl",
+      "insured_sex",
+      "insured_education_level",
+      "insured_occupation",
+      "insured_hobbies",
+      "insured_relationship",
+      "incident_type",
+      "collision_type",
+      "incident_severity",
+      "authorities_contacted",
+      "incident_state",
+      "incident_city",
+      "property_damage",
+      "police_report_available",
+      "auto_make"
+    ],
+    "numeric_features": [
+      "months_as_customer",
+      "age",
+      "policy_deductable",
+      "policy_annual_premium",
+      "umbrella_limit",
+      "capital-gains",
+      "capital-loss",
+      "incident_hour_of_the_day",
+      "number_of_vehicles_involved",
+      "bodily_injuries",
+      "witnesses",
+      "total_claim_amount",
+      "injury_claim",
+      "property_claim",
+      "vehicle_claim",
+      "auto_year",
+      "incident_year",
+      "policy_bind_year"
+    ],
+    "transformed_order": [
+      "cat__policy_state",
+      "cat__policy_csl",
+      "cat__insured_sex",
+      "cat__insured_education_level",
+      "cat__insured_occupation",
+      "cat__insured_hobbies",
+      "cat__insured_relationship",
+      "cat__incident_type",
+      "cat__collision_type",
+      "cat__incident_severity",
+      "cat__authorities_contacted",
+      "cat__incident_state",
+      "cat__incident_city",
+      "cat__property_damage",
+      "cat__police_report_available",
+      "cat__auto_make",
+      "remainder__months_as_customer",
+      "remainder__age",
+      "remainder__policy_deductable",
+      "remainder__policy_annual_premium",
+      "remainder__umbrella_limit",
+      "remainder__capital-gains",
+      "remainder__capital-loss",
+      "remainder__incident_hour_of_the_day",
+      "remainder__number_of_vehicles_involved",
+      "remainder__bodily_injuries",
+      "remainder__witnesses",
+      "remainder__total_claim_amount",
+      "remainder__injury_claim",
+      "remainder__property_claim",
+      "remainder__vehicle_claim",
+      "remainder__auto_year",
+      "remainder__incident_year",
+      "remainder__policy_bind_year"
+    ],
+    "transformed_display_names": [
+      "policy_state",
+      "policy_csl",
+      "insured_sex",
+      "insured_education_level",
+      "insured_occupation",
+      "insured_hobbies",
+      "insured_relationship",
+      "incident_type",
+      "collision_type",
+      "incident_severity",
+      "authorities_contacted",
+      "incident_state",
+      "incident_city",
+      "property_damage",
+      "police_report_available",
+      "auto_make",
+      "months_as_customer",
+      "age",
+      "policy_deductable",
+      "policy_annual_premium",
+      "umbrella_limit",
+      "capital-gains",
+      "capital-loss",
+      "incident_hour_of_the_day",
+      "number_of_vehicles_involved",
+      "bodily_injuries",
+      "witnesses",
+      "total_claim_amount",
+      "injury_claim",
+      "property_claim",
+      "vehicle_claim",
+      "auto_year",
+      "incident_year",
+      "policy_bind_year"
+    ],
+    "dropped_columns": [
+      "policy_number",
+      "insured_zip",
+      "incident_location",
+      "incident_date",
+      "policy_bind_date",
+      "_c39",
+      "auto_model"
+    ],
+    "derived_features": {
+      "incident_date": "incident_year",
+      "policy_bind_date": "policy_bind_year"
+    },
+    "target": "fraud_reported"
+  },
+  "preprocessing_contract": {
+    "summary": "pipeline.pkl imputasyon ve encoding'i kapsar; ham CSV şemasından pipeline girdisine geçişi KAPSAMAZ. Çağıran (API katmanı) aşağıdaki adımları pipeline'a vermeden ÖNCE uygulamak zorundadır.",
+    "inside_pipeline": [
+      "categorical_imputation: SimpleImputer(strategy='most_frequent')",
+      "categorical_encoding: OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)",
+      "numeric_passthrough: imputasyon yok, LightGBM NaN'ı native taşır"
+    ],
+    "caller_must_apply_before_predict": [
+      {
+        "step": "drop_columns",
+        "columns": [
+          "policy_number",
+          "insured_zip",
+          "incident_location",
+          "incident_date",
+          "policy_bind_date",
+          "_c39",
+          "auto_model"
+        ],
+        "reason": "PII, ham tarihler, boş artık kolon ve yüksek kardinaliteli auto_model."
+      },
+      {
+        "step": "derive_year_features",
+        "mapping": {
+          "incident_date": "incident_year",
+          "policy_bind_date": "policy_bind_year"
+        },
+        "reason": "Pipeline tarih parse etmez; yıl feature'ı dışarıda türetilir."
+      },
+      {
+        "step": "question_mark_to_nan",
+        "columns": [
+          "property_damage",
+          "police_report_available",
+          "collision_type"
+        ],
+        "reason": "Bu kolonlarda eksik değer '?' string'i olarak kodlanmış. Dönüştürülmezse encoder '?' değerini bilinmeyen kategori sayıp -1'e kodlar ve imputer devreye girmez -> sessiz hatalı tahmin."
+      },
+      {
+        "step": "order_columns",
+        "columns": [
+          "months_as_customer",
+          "age",
+          "policy_state",
+          "policy_csl",
+          "policy_deductable",
+          "policy_annual_premium",
+          "umbrella_limit",
+          "insured_sex",
+          "insured_education_level",
+          "insured_occupation",
+          "insured_hobbies",
+          "insured_relationship",
+          "capital-gains",
+          "capital-loss",
+          "incident_type",
+          "collision_type",
+          "incident_severity",
+          "authorities_contacted",
+          "incident_state",
+          "incident_city",
+          "incident_hour_of_the_day",
+          "number_of_vehicles_involved",
+          "property_damage",
+          "bodily_injuries",
+          "witnesses",
+          "police_report_available",
+          "total_claim_amount",
+          "injury_claim",
+          "property_claim",
+          "vehicle_claim",
+          "auto_make",
+          "auto_year",
+          "incident_year",
+          "policy_bind_year"
+        ],
+        "reason": "Pipeline girdisi bu kolon adlarını ve sırasını bekler."
+      }
+    ],
+    "note_on_encoding_ban": "Bu adımlar ŞEMA NORMALİZASYONUDUR, encoding değildir. Kategorik değerleri sayıya çevirmek hâlâ yalnızca pipeline'ın işidir."
+  },
+  "fairness": {
+    "status": "declared_not_audited",
+    "protected_attributes_used_as_features": [
+      {
+        "feature": "insured_sex",
+        "basis": "sex",
+        "severity": "high",
+        "rationale": "Cinsiyet, çoğu yargı bölgesinde doğrudan korunan niteliktir. Model feature'ı olarak kullanılıyor; dolandırıcılık skoru cinsiyete göre değişebilir.",
+        "used_as_model_feature": true
+      },
+      {
+        "feature": "age",
+        "basis": "age",
+        "severity": "high",
+        "rationale": "Yaş korunan niteliktir. Sigorta fiyatlamasında bazı yargı bölgelerinde aktüeryal gerekçeyle izinli olabilir, ancak dolandırıcılık *şüphesi* skorlamasında aynı muafiyet varsayılamaz.",
+        "used_as_model_feature": true
+      },
+      {
+        "feature": "insured_relationship",
+        "basis": "marital_and_familial_status",
+        "severity": "medium",
+        "rationale": "Değerler (husband/wife/unmarried/own-child/...) medeni ve ailevi durumu doğrudan açık eder; bu birçok yargı bölgesinde korunan niteliktir. Ayrıca cinsiyet için güçlü bir vekildir (husband/wife -> insured_sex).",
+        "used_as_model_feature": true
+      },
+      {
+        "feature": "insured_education_level",
+        "basis": "socioeconomic_proxy",
+        "severity": "medium",
+        "rationale": "Klasik anlamda korunan sınıf değil, ancak sosyoekonomik köken ve dolaylı olarak ırk/ulusal köken için iyi belgelenmiş bir vekildir. Ayrımcılık denetiminde vekil değişken olarak ele alınmalıdır.",
+        "used_as_model_feature": true
+      }
+    ],
+    "proxy_risk_attributes": [
+      {
+        "feature": "insured_occupation",
+        "basis": "socioeconomic_proxy",
+        "rationale": "Meslek; gelir, eğitim ve demografi için güçlü vekildir.",
+        "used_as_model_feature": true
+      },
+      {
+        "feature": "insured_hobbies",
+        "basis": "lifestyle_proxy",
+        "rationale": "SHAP'ta yüksek etkili çıkıyor; yaşam tarzı/kültürel köken vekili olabilir ve nedensel bir dolandırıcılık gerekçesi yoktur.",
+        "used_as_model_feature": true
+      },
+      {
+        "feature": "policy_state",
+        "basis": "geographic_proxy",
+        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "used_as_model_feature": true
+      },
+      {
+        "feature": "incident_state",
+        "basis": "geographic_proxy",
+        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "used_as_model_feature": true
+      },
+      {
+        "feature": "incident_city",
+        "basis": "geographic_proxy",
+        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "used_as_model_feature": true
+      }
+    ],
+    "audit_performed": false,
+    "audit_metrics_computed": [],
+    "intended_use": "demo_and_portfolio_only",
+    "production_requirements": [
+      "Korunan nitelik başına grup bazlı fairness denetimi koş (ör. demografik parite farkı, eşitlenmiş fırsat / TPR-FPR farkı, kalibrasyon farkı).",
+      "Korunan niteliği düşürmenin ayrımcılığı gerçekten azaltıp azaltmadığını ölç: vekil feature'lar (meslek, hobi, coğrafya) sinyali geri taşıyabilir.",
+      "İnsan gözden geçirmesi zorunlu: model çıktısı bir talebi tek başına reddetmek için değil, önceliklendirme/triyaj için kullanılmalı.",
+      "Yerel düzenlemeyle uyumu doğrula (ör. AB AI Act yüksek riskli sistem yükümlülükleri, ABD eyalet sigorta ayrımcılık mevzuatı)."
+    ],
+    "notes": "Model bu feature'larla eğitildi ve Faz 0'da bilinçli olarak öyle bırakıldı: amaç yayınlanan modeli SADIK biçimde yeniden üretmekti. Bu bölüm bir uyumluluk beyanı değil, bilinen riskin açık kaydıdır."
+  },
+  "defaults": {
+    "months_as_customer": {
+      "value": 202,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "age": {
+      "value": 38,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "policy_state": {
+      "value": "OH",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "policy_csl": {
+      "value": "250/500",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "policy_deductable": {
+      "value": 1000,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "policy_annual_premium": {
+      "value": 1265.78,
+      "dtype": "float64",
+      "strategy": "median"
+    },
+    "umbrella_limit": {
+      "value": 0,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "insured_sex": {
+      "value": "FEMALE",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "insured_education_level": {
+      "value": "JD",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "insured_occupation": {
+      "value": "machine-op-inspct",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "insured_hobbies": {
+      "value": "reading",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "insured_relationship": {
+      "value": "other-relative",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "capital-gains": {
+      "value": 0,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "capital-loss": {
+      "value": -21200,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "incident_type": {
+      "value": "Multi-vehicle Collision",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "collision_type": {
+      "value": "Rear Collision",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "incident_severity": {
+      "value": "Minor Damage",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "authorities_contacted": {
+      "value": "Police",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "incident_state": {
+      "value": "NY",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "incident_city": {
+      "value": "Springfield",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "incident_hour_of_the_day": {
+      "value": 12,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "number_of_vehicles_involved": {
+      "value": 1,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "property_damage": {
+      "value": "NO",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "bodily_injuries": {
+      "value": 1,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "witnesses": {
+      "value": 1,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "police_report_available": {
+      "value": "NO",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "total_claim_amount": {
+      "value": 57700,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "injury_claim": {
+      "value": 6675,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "property_claim": {
+      "value": 6700,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "vehicle_claim": {
+      "value": 41760,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "auto_make": {
+      "value": "Suburu",
+      "dtype": "str",
+      "strategy": "mode"
+    },
+    "auto_year": {
+      "value": 2005,
+      "dtype": "int64",
+      "strategy": "median"
+    },
+    "incident_year": {
+      "value": 2015,
+      "dtype": "int32",
+      "strategy": "median"
+    },
+    "policy_bind_year": {
+      "value": 2002,
+      "dtype": "int32",
+      "strategy": "median"
+    }
+  },
+  "training_ranges": {
+    "months_as_customer": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 0,
+      "max": 479
+    },
+    "age": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 20,
+      "max": 64
+    },
+    "policy_deductable": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 500,
+      "max": 2000
+    },
+    "policy_annual_premium": {
+      "type": "numeric",
+      "dtype": "float64",
+      "min": 433.33,
+      "max": 2047.59
+    },
+    "umbrella_limit": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": -1000000,
+      "max": 10000000
+    },
+    "capital-gains": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 0,
+      "max": 100500
+    },
+    "capital-loss": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": -111100,
+      "max": 0
+    },
+    "incident_hour_of_the_day": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 0,
+      "max": 23
+    },
+    "number_of_vehicles_involved": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 1,
+      "max": 4
+    },
+    "bodily_injuries": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 0,
+      "max": 2
+    },
+    "witnesses": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 0,
+      "max": 3
+    },
+    "total_claim_amount": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 1920,
+      "max": 114920
+    },
+    "injury_claim": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 0,
+      "max": 21450
+    },
+    "property_claim": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 0,
+      "max": 23670
+    },
+    "vehicle_claim": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 1440,
+      "max": 79560
+    },
+    "auto_year": {
+      "type": "numeric",
+      "dtype": "int64",
+      "min": 1995,
+      "max": 2015
+    },
+    "incident_year": {
+      "type": "numeric",
+      "dtype": "int32",
+      "min": 2015,
+      "max": 2015
+    },
+    "policy_bind_year": {
+      "type": "numeric",
+      "dtype": "int32",
+      "min": 1990,
+      "max": 2015
+    },
+    "policy_state": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "IL",
+        "IN",
+        "OH"
+      ]
+    },
+    "policy_csl": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "100/300",
+        "250/500",
+        "500/1000"
+      ]
+    },
+    "insured_sex": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "FEMALE",
+        "MALE"
+      ]
+    },
+    "insured_education_level": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "Associate",
+        "College",
+        "High School",
+        "JD",
+        "MD",
+        "Masters",
+        "PhD"
+      ]
+    },
+    "insured_occupation": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "adm-clerical",
+        "armed-forces",
+        "craft-repair",
+        "exec-managerial",
+        "farming-fishing",
+        "handlers-cleaners",
+        "machine-op-inspct",
+        "other-service",
+        "priv-house-serv",
+        "prof-specialty",
+        "protective-serv",
+        "sales",
+        "tech-support",
+        "transport-moving"
+      ]
+    },
+    "insured_hobbies": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "base-jumping",
+        "basketball",
+        "board-games",
+        "bungie-jumping",
+        "camping",
+        "chess",
+        "cross-fit",
+        "dancing",
+        "exercise",
+        "golf",
+        "hiking",
+        "kayaking",
+        "movies",
+        "paintball",
+        "polo",
+        "reading",
+        "skydiving",
+        "sleeping",
+        "video-games",
+        "yachting"
+      ]
+    },
+    "insured_relationship": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "husband",
+        "not-in-family",
+        "other-relative",
+        "own-child",
+        "unmarried",
+        "wife"
+      ]
+    },
+    "incident_type": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "Multi-vehicle Collision",
+        "Parked Car",
+        "Single Vehicle Collision",
+        "Vehicle Theft"
+      ]
+    },
+    "collision_type": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "Front Collision",
+        "Rear Collision",
+        "Side Collision"
+      ]
+    },
+    "incident_severity": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "Major Damage",
+        "Minor Damage",
+        "Total Loss",
+        "Trivial Damage"
+      ]
+    },
+    "authorities_contacted": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "Ambulance",
+        "Fire",
+        "Other",
+        "Police"
+      ]
+    },
+    "incident_state": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "NC",
+        "NY",
+        "OH",
+        "PA",
+        "SC",
+        "VA",
+        "WV"
+      ]
+    },
+    "incident_city": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "Arlington",
+        "Columbus",
+        "Hillsdale",
+        "Northbend",
+        "Northbrook",
+        "Riverwood",
+        "Springfield"
+      ]
+    },
+    "property_damage": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "NO",
+        "YES"
+      ]
+    },
+    "police_report_available": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "NO",
+        "YES"
+      ]
+    },
+    "auto_make": {
+      "type": "categorical",
+      "dtype": "str",
+      "categories": [
+        "Accura",
+        "Audi",
+        "BMW",
+        "Chevrolet",
+        "Dodge",
+        "Ford",
+        "Honda",
+        "Jeep",
+        "Mercedes",
+        "Nissan",
+        "Saab",
+        "Suburu",
+        "Toyota",
+        "Volkswagen"
+      ]
+    }
+  },
+  "model_params": {
+    "n_estimators": 173,
+    "learning_rate": 0.010634,
+    "num_leaves": 37,
+    "min_child_samples": 93,
+    "random_state": 42,
+    "verbose": -1,
+    "scale_pos_weight": 3.04040404040404
+  },
+  "library_versions": {
+    "python": "3.14.6",
+    "pandas": "3.0.3",
+    "numpy": "2.4.6",
+    "scikit-learn": "1.9.0",
+    "lightgbm": "4.6.0",
+    "joblib": "1.5.3",
+    "shap": "0.52.0"
+  }
+}

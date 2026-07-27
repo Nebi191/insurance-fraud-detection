@@ -31,9 +31,17 @@ Insurance fraud costs the industry billions of dollars annually. This project bu
 
 ### Notebook 2 — Preprocessing & Feature Engineering
 - Dropped irrelevant columns (policy number, zip code, location)
-- Engineered features: `vehicle_age`, `policy_bind_year`, `injury_ratio`
+- Normalized hidden missing values (`"?"` → `NaN`) in 3 columns
+- Derived `incident_year` / `policy_bind_year` from the raw date columns
 - Built sklearn `Pipeline` with `ColumnTransformer` (OrdinalEncoder + SimpleImputer)
 - Stratified train/test split (80/20, `random_state=42`)
+
+> **Correction (2026-07-27):** an earlier version of this README claimed the
+> features `vehicle_age` and `injury_ratio` were engineered here. They were
+> **not**. That code sat in a markdown cell and never executed — the published
+> model was trained without them. The consolidated pipeline in
+> `backend/train_pipeline.py` faithfully reproduces the model **as it was
+> actually trained**, so those features are absent there too.
 
 ### Notebook 3 — Modeling
 - Baseline: LightGBM and XGBoost with `scale_pos_weight`
@@ -61,18 +69,22 @@ Insurance fraud costs the industry billions of dollars annually. This project bu
 
 ---
 
-## 🚀 Streamlit App
+## 🚀 Application
 
-The app provides two modes:
+The original Streamlit prototype (`app.py`) has been **removed**. It loaded
+three separate artifacts (`best_model_lgb.pkl`, `preprocessor.pkl`,
+`defaults.pkl`) that no longer exist — those were consolidated into a single
+`backend/models/pipeline.pkl`. It remains in the git history.
 
-**1. Manual Prediction**
-- Input key claim features (incident severity, auto year, witnesses, capital gains)
-- Real-time fraud probability with risk indicator (Low / Medium / High)
-- SHAP waterfall plot explaining each individual prediction
+It is being replaced by a FastAPI backend + React frontend (work in progress):
 
-**2. Coming Soon**
-- Batch CSV upload for bulk predictions
-- Model metrics dashboard with PR curve and confusion matrix
+- `backend/train_pipeline.py` — trains and packages preprocessor + model as one
+  sklearn `Pipeline`, plus `models/metadata.json` (metrics, defaults, training
+  ranges, preprocessing contract, fairness declaration)
+- `backend/app/` — FastAPI service (`/predict`, `/health`, `/model-info`)
+- `frontend/` — React + Vite + TypeScript UI with interactive SHAP charts
+
+This section will be rewritten once the service is deployed.
 
 ---
 
@@ -83,11 +95,11 @@ The app provides two modes:
 git https://github.com/Nebi191/insurance-fraud-detection.git
 cd insurance-fraud-detection
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# 2. Install the exploration dependencies
+pip install -r notebooks/requirements.txt
 
-# 3. Add the dataset
-# Place insurance_claims.csv in the root directory
+# 3. The dataset is already in the repo
+# data/insurance_claims.csv
 
 # 4. Run notebooks in order
 # NB1_EDA.ipynb
@@ -95,8 +107,9 @@ pip install -r requirements.txt
 # NB3_Modeling.ipynb
 # NB4_SHAP.ipynb
 
-# 5. Launch the app
-streamlit run app.py
+# 5. Reproduce the packaged model artifact
+#    (uses its own pinned deps: backend/requirements.txt)
+python backend/train_pipeline.py
 ```
 
 ---
