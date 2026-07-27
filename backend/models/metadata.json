@@ -2,7 +2,7 @@
   "model_name": "insurance-fraud-detection",
   "model_version": "1.0.0",
   "algorithm": "LightGBM (LGBMClassifier)",
-  "trained_at": "2026-07-27T13:51:37+00:00",
+  "trained_at": "2026-07-27T17:00:28+00:00",
   "dataset": {
     "source_file": "insurance_claims.csv",
     "n_rows": 1000,
@@ -181,6 +181,206 @@
     },
     "target": "fraud_reported"
   },
+  "feature_influence": {
+    "description": "Eğitilmiş LightGBM booster'ından ölçülen feature etkisi. split_count = ağaçlarda bu kolon üzerinde yapılan bölünme sayısı, gain = bu bölünmelerin toplam kazancı, has_influence = split_count > 0.",
+    "measured_from": "lightgbm booster_.feature_importance(importance_type='split'|'gain')",
+    "interpretation_note": "has_influence=false olan bir feature bu EĞİTİLMİŞ modelde hiçbir tahmini etkilemez; SHAP katkısı her zaman tam 0.0'dır. Bu, feature'ın modele verilmediği anlamına GELMEZ — verildi, ağaçlar kullanmadı. Model yeniden eğitilirse (farklı veri, farklı seed, farklı hiperparametre) bu liste değişebilir.",
+    "summary": {
+      "n_features": 34,
+      "n_with_influence": 18,
+      "n_without_influence": 16,
+      "features_without_influence": [
+        "authorities_contacted",
+        "bodily_injuries",
+        "collision_type",
+        "incident_hour_of_the_day",
+        "incident_state",
+        "incident_type",
+        "incident_year",
+        "insured_relationship",
+        "insured_sex",
+        "number_of_vehicles_involved",
+        "police_report_available",
+        "policy_deductable",
+        "policy_state",
+        "property_damage",
+        "umbrella_limit",
+        "vehicle_claim"
+      ]
+    },
+    "features": {
+      "policy_state": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "policy_csl": {
+        "split_count": 8,
+        "gain": 50.138010025024414,
+        "has_influence": true
+      },
+      "insured_sex": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "insured_education_level": {
+        "split_count": 12,
+        "gain": 102.07801151275635,
+        "has_influence": true
+      },
+      "insured_occupation": {
+        "split_count": 10,
+        "gain": 50.53077030181885,
+        "has_influence": true
+      },
+      "insured_hobbies": {
+        "split_count": 353,
+        "gain": 17597.322239160538,
+        "has_influence": true
+      },
+      "insured_relationship": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "incident_type": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "collision_type": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "incident_severity": {
+        "split_count": 173,
+        "gain": 14811.608204841614,
+        "has_influence": true
+      },
+      "authorities_contacted": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "incident_state": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "incident_city": {
+        "split_count": 15,
+        "gain": 93.3505597114563,
+        "has_influence": true
+      },
+      "property_damage": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "police_report_available": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "auto_make": {
+        "split_count": 14,
+        "gain": 23.537670016288757,
+        "has_influence": true
+      },
+      "months_as_customer": {
+        "split_count": 7,
+        "gain": 24.900180101394653,
+        "has_influence": true
+      },
+      "age": {
+        "split_count": 8,
+        "gain": 54.308629512786865,
+        "has_influence": true
+      },
+      "policy_deductable": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "policy_annual_premium": {
+        "split_count": 107,
+        "gain": 311.7165503501892,
+        "has_influence": true
+      },
+      "umbrella_limit": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "capital-gains": {
+        "split_count": 75,
+        "gain": 454.2519018650055,
+        "has_influence": true
+      },
+      "capital-loss": {
+        "split_count": 67,
+        "gain": 135.74969947338104,
+        "has_influence": true
+      },
+      "incident_hour_of_the_day": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "number_of_vehicles_involved": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "bodily_injuries": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "witnesses": {
+        "split_count": 37,
+        "gain": 246.3965311050415,
+        "has_influence": true
+      },
+      "total_claim_amount": {
+        "split_count": 1,
+        "gain": 1.2072700262069702,
+        "has_influence": true
+      },
+      "injury_claim": {
+        "split_count": 7,
+        "gain": 40.99931001663208,
+        "has_influence": true
+      },
+      "property_claim": {
+        "split_count": 5,
+        "gain": 16.385129928588867,
+        "has_influence": true
+      },
+      "vehicle_claim": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "auto_year": {
+        "split_count": 74,
+        "gain": 537.8883957862854,
+        "has_influence": true
+      },
+      "incident_year": {
+        "split_count": 0,
+        "gain": 0.0,
+        "has_influence": false
+      },
+      "policy_bind_year": {
+        "split_count": 46,
+        "gain": 253.5343999862671,
+        "has_influence": true
+      }
+    }
+  },
   "preprocessing_contract": {
     "summary": "pipeline.pkl imputasyon ve encoding'i kapsar; ham CSV şemasından pipeline girdisine geçişi KAPSAMAZ. Çağıran (API katmanı) aşağıdaki adımları pipeline'a vermeden ÖNCE uygulamak zorundadır.",
     "inside_pipeline": [
@@ -264,34 +464,43 @@
   },
   "fairness": {
     "status": "declared_not_audited",
+    "field_semantics": "used_as_model_feature = feature modele VERİLDİ. has_influence = eğitilmiş ağaçlar bu kolonda gerçekten bölünme yaptı. İKİSİ AYNI ŞEY DEĞİLDİR: split_count=0 olan bir feature bu eğitilmiş modelde hiçbir tahmini etkilemez ve SHAP katkısı her zaman tam 0.0'dır. Bu ölçüm bir FAIRNESS DENETİMİ YERİNE GEÇMEZ: (1) model yeniden eğitilirse sonuç değişebilir, (2) vekil feature'lar (meslek, hobi, coğrafya) aynı sinyali dolaylı olarak geri taşıyabilir, (3) etkisi sıfır olmayan nitelikler için hiçbir grup bazlı metrik hesaplanmadı.",
     "protected_attributes_used_as_features": [
       {
         "feature": "insured_sex",
         "basis": "sex",
         "severity": "high",
         "rationale": "Cinsiyet, çoğu yargı bölgesinde doğrudan korunan niteliktir. Model feature'ı olarak kullanılıyor; dolandırıcılık skoru cinsiyete göre değişebilir.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 0,
+        "has_influence": false
       },
       {
         "feature": "age",
         "basis": "age",
         "severity": "high",
         "rationale": "Yaş korunan niteliktir. Sigorta fiyatlamasında bazı yargı bölgelerinde aktüeryal gerekçeyle izinli olabilir, ancak dolandırıcılık *şüphesi* skorlamasında aynı muafiyet varsayılamaz.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 8,
+        "has_influence": true
       },
       {
         "feature": "insured_relationship",
         "basis": "marital_and_familial_status",
         "severity": "medium",
         "rationale": "Değerler (husband/wife/unmarried/own-child/...) medeni ve ailevi durumu doğrudan açık eder; bu birçok yargı bölgesinde korunan niteliktir. Ayrıca cinsiyet için güçlü bir vekildir (husband/wife -> insured_sex).",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 0,
+        "has_influence": false
       },
       {
         "feature": "insured_education_level",
         "basis": "socioeconomic_proxy",
         "severity": "medium",
         "rationale": "Klasik anlamda korunan sınıf değil, ancak sosyoekonomik köken ve dolaylı olarak ırk/ulusal köken için iyi belgelenmiş bir vekildir. Ayrımcılık denetiminde vekil değişken olarak ele alınmalıdır.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 12,
+        "has_influence": true
       }
     ],
     "proxy_risk_attributes": [
@@ -299,31 +508,41 @@
         "feature": "insured_occupation",
         "basis": "socioeconomic_proxy",
         "rationale": "Meslek; gelir, eğitim ve demografi için güçlü vekildir.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 10,
+        "has_influence": true
       },
       {
         "feature": "insured_hobbies",
         "basis": "lifestyle_proxy",
         "rationale": "SHAP'ta yüksek etkili çıkıyor; yaşam tarzı/kültürel köken vekili olabilir ve nedensel bir dolandırıcılık gerekçesi yoktur.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 353,
+        "has_influence": true
       },
       {
         "feature": "policy_state",
         "basis": "geographic_proxy",
         "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 0,
+        "has_influence": false
       },
       {
         "feature": "incident_state",
         "basis": "geographic_proxy",
         "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 0,
+        "has_influence": false
       },
       {
         "feature": "incident_city",
         "basis": "geographic_proxy",
         "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
-        "used_as_model_feature": true
+        "used_as_model_feature": true,
+        "split_count": 15,
+        "has_influence": true
       }
     ],
     "audit_performed": false,
@@ -335,7 +554,7 @@
       "İnsan gözden geçirmesi zorunlu: model çıktısı bir talebi tek başına reddetmek için değil, önceliklendirme/triyaj için kullanılmalı.",
       "Yerel düzenlemeyle uyumu doğrula (ör. AB AI Act yüksek riskli sistem yükümlülükleri, ABD eyalet sigorta ayrımcılık mevzuatı)."
     ],
-    "notes": "Model bu feature'larla eğitildi ve Faz 0'da bilinçli olarak öyle bırakıldı: amaç yayınlanan modeli SADIK biçimde yeniden üretmekti. Bu bölüm bir uyumluluk beyanı değil, bilinen riskin açık kaydıdır."
+    "notes": "Model bu feature'larla eğitildi ve Faz 0'da bilinçli olarak öyle bırakıldı: amaç yayınlanan modeli SADIK biçimde yeniden üretmekti. Bu bölüm bir uyumluluk beyanı değil, bilinen riskin açık kaydıdır.\n\nÖLÇÜM NOTU: bu eğitilmiş modelde bazı korunan/vekil niteliklerin split_count değeri 0'dır, yani ölçülen etkileri sıfırdır (her SHAP katkısı tam 0.0). Bu, modelin adil olduğu ya da ilgili nitelikle ayrımcılık yapmadığı ANLAMINA GELMEZ. Söylenebilecek tek şey, bu feature'ların bu spesifik eğitilmiş ağaç kümesindeki ölçülen etkisinin sıfır olduğudur. Etkisi sıfır olmayan nitelikler için hiçbir grup bazlı fairness metriği hesaplanmadı; audit_performed hâlâ false ve aşağıdaki production_requirements maddeleri aynen geçerlidir."
   },
   "defaults": {
     "months_as_customer": {

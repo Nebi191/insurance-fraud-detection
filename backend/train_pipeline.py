@@ -218,12 +218,98 @@ PROXY_RISK_ATTRIBUTES = [
 ]
 
 
-def build_fairness_section(cat_cols: list[str], num_cols: list[str]) -> dict:
+def build_feature_influence(fitted_pipeline: Pipeline, display_names: list[str]) -> dict:
+    """Her feature'ın eğitilmiş modeldeki ÖLÇÜLEN etkisi.
+
+    NEDEN METADATA'DA, RUNTIME'DA DEĞİL:
+    Split/gain sayıları eğitim anının olgusudur — eğitilmiş ağaçlar sabittir,
+    bu sayılar her istekte yeniden hesaplanacak bir şey değil. Doğru evleri
+    artefaktın yanı. Runtime'da hesaplamak hem israf hem de "hangi modelin
+    sayısı?" belirsizliği yaratırdı.
+
+    NEDEN ÖNEMLİ:
+    Bir feature'ı modele VERMEK ile modelin onu KULLANMASI aynı şey değildir.
+    LightGBM eğitim sırasında bir kolonda hiç bölünme yapmamışsa (`split_count`
+    = 0) o kolon tahmini hiç etkilemez ve SHAP katkısı her zaman tam 0.0'dır.
+    Bu ayrım hem ürün (kullanıcı formda bir alanı değiştirip sonucun
+    kıpırdamadığını görüyor) hem de fairness beyanı açısından kritik.
+
+    ANAHTARLAR API ALAN ADLARIDIR:
+    `display_names` zaten `cat__`/`remainder__` öneki atılmış hâldir, yani
+    `capital-gains` tireli hâliyle gelir — API şemasındaki alan adının ta
+    kendisi. Frontend'in ayrıca bir eşleme tablosu tutması gerekmez.
+    """
+    booster = fitted_pipeline.named_steps["model"].booster_
+
+    # Booster'ın kendi feature adları ile bizim temiz adlarımız POZİSYON
+    # bazında eşleşmek zorunda; eşleşmezse bütün sayılar yanlış feature'a
+    # yazılırdı ve bu sessiz bir hata olurdu.
+    booster_names = [name.split("__", 1)[-1] for name in booster.feature_name()]
+    if booster_names != list(display_names):
+        raise ValueError(
+            "Booster feature adları transformed_display_names ile eşleşmiyor; "
+            "etki sayıları yanlış feature'lara yazılırdı."
+        )
+
+    split_counts = booster.feature_importance(importance_type="split")
+    gains = booster.feature_importance(importance_type="gain")
+
+    features: dict[str, dict] = {}
+    for name, split_count, gain in zip(display_names, split_counts, gains):
+        split_count = int(split_count)
+        features[name] = {
+            "split_count": split_count,
+            "gain": float(gain),
+            # Tanım: eğitilmiş ağaçlar bu kolonda en az bir kez bölündü mü?
+            "has_influence": split_count > 0,
+        }
+
+    dead = sorted(name for name, info in features.items() if not info["has_influence"])
+
+    return {
+        "description": (
+            "Eğitilmiş LightGBM booster'ından ölçülen feature etkisi. "
+            "split_count = ağaçlarda bu kolon üzerinde yapılan bölünme sayısı, "
+            "gain = bu bölünmelerin toplam kazancı, has_influence = split_count > 0."
+        ),
+        "measured_from": "lightgbm booster_.feature_importance(importance_type='split'|'gain')",
+        "interpretation_note": (
+            "has_influence=false olan bir feature bu EĞİTİLMİŞ modelde hiçbir "
+            "tahmini etkilemez; SHAP katkısı her zaman tam 0.0'dır. Bu, "
+            "feature'ın modele verilmediği anlamına GELMEZ — verildi, ağaçlar "
+            "kullanmadı. Model yeniden eğitilirse (farklı veri, farklı seed, "
+            "farklı hiperparametre) bu liste değişebilir."
+        ),
+        "summary": {
+            "n_features": len(features),
+            "n_with_influence": len(features) - len(dead),
+            "n_without_influence": len(dead),
+            "features_without_influence": dead,
+        },
+        "features": features,
+    }
+
+
+def build_fairness_section(
+    cat_cols: list[str], num_cols: list[str], feature_influence: dict
+) -> dict:
     """Model card'ın makine-okunur fairness bölümü.
 
     Feature adları eğitimde gerçekten kullanılan kolon listesine karşı
     doğrulanır: metadata'nın modelde olmayan bir feature'ı "korunan nitelik"
     diye ilan etmesi (ya da tersi) sessizce eskimesin.
+
+    BEYAN İLE ÖLÇÜM AYRIŞTIRILDI:
+    Eskiden bu bölümde yalnızca `used_as_model_feature: true` vardı. Teknik
+    olarak doğru ama okuyucuyu yanlış yönlendiriyordu: model card "cinsiyet
+    skoru etkileyebilir" derken, ölçüm "eğitilmiş ağaçlar bu kolonda hiç
+    bölünme yapmamış" diyordu. Artık iki alan yan yana duruyor:
+
+        used_as_model_feature -> feature modele VERİLDİ (beyan)
+        has_influence         -> eğitilmiş ağaçlar onu KULLANDI (ölçüm)
+
+    Sayılar `feature_influence`'tan gelir, yani booster'dan hesaplanır; elle
+    yazılmış sabit değildir ve model değişince kendiliğinden güncellenir.
     """
     model_features = set(cat_cols) | set(num_cols)
 
@@ -234,14 +320,35 @@ def build_fairness_section(cat_cols: list[str], num_cols: list[str]) -> dict:
                 "feature'ları arasında yok. Liste eğitimle senkron değil."
             )
 
+    measured = feature_influence["features"]
+
+    def with_measurement(entry: dict) -> dict:
+        influence = measured[entry["feature"]]
+        return {
+            **entry,
+            # BEYAN: feature modele girdi olarak verildi.
+            "used_as_model_feature": True,
+            # ÖLÇÜM: eğitilmiş modelde gerçekten kullanıldı mı?
+            "split_count": influence["split_count"],
+            "has_influence": influence["has_influence"],
+        }
+
     return {
         "status": "declared_not_audited",
+        "field_semantics": (
+            "used_as_model_feature = feature modele VERİLDİ. "
+            "has_influence = eğitilmiş ağaçlar bu kolonda gerçekten bölünme yaptı. "
+            "İKİSİ AYNI ŞEY DEĞİLDİR: split_count=0 olan bir feature bu eğitilmiş "
+            "modelde hiçbir tahmini etkilemez ve SHAP katkısı her zaman tam 0.0'dır. "
+            "Bu ölçüm bir FAIRNESS DENETİMİ YERİNE GEÇMEZ: (1) model yeniden "
+            "eğitilirse sonuç değişebilir, (2) vekil feature'lar (meslek, hobi, "
+            "coğrafya) aynı sinyali dolaylı olarak geri taşıyabilir, (3) etkisi "
+            "sıfır olmayan nitelikler için hiçbir grup bazlı metrik hesaplanmadı."
+        ),
         "protected_attributes_used_as_features": [
-            {**entry, "used_as_model_feature": True} for entry in PROTECTED_ATTRIBUTES
+            with_measurement(entry) for entry in PROTECTED_ATTRIBUTES
         ],
-        "proxy_risk_attributes": [
-            {**entry, "used_as_model_feature": True} for entry in PROXY_RISK_ATTRIBUTES
-        ],
+        "proxy_risk_attributes": [with_measurement(entry) for entry in PROXY_RISK_ATTRIBUTES],
         "audit_performed": False,
         "audit_metrics_computed": [],
         "intended_use": "demo_and_portfolio_only",
@@ -266,7 +373,16 @@ def build_fairness_section(cat_cols: list[str], num_cols: list[str]) -> dict:
         "notes": (
             "Model bu feature'larla eğitildi ve Faz 0'da bilinçli olarak öyle "
             "bırakıldı: amaç yayınlanan modeli SADIK biçimde yeniden üretmekti. "
-            "Bu bölüm bir uyumluluk beyanı değil, bilinen riskin açık kaydıdır."
+            "Bu bölüm bir uyumluluk beyanı değil, bilinen riskin açık kaydıdır.\n\n"
+            "ÖLÇÜM NOTU: bu eğitilmiş modelde bazı korunan/vekil niteliklerin "
+            "split_count değeri 0'dır, yani ölçülen etkileri sıfırdır (her SHAP "
+            "katkısı tam 0.0). Bu, modelin adil olduğu ya da ilgili nitelikle "
+            "ayrımcılık yapmadığı ANLAMINA GELMEZ. Söylenebilecek tek şey, bu "
+            "feature'ların bu spesifik eğitilmiş ağaç kümesindeki ölçülen "
+            "etkisinin sıfır olduğudur. Etkisi sıfır olmayan nitelikler için "
+            "hiçbir grup bazlı fairness metriği hesaplanmadı; audit_performed "
+            "hâlâ false ve aşağıdaki production_requirements maddeleri aynen "
+            "geçerlidir."
         ),
     }
 
@@ -690,6 +806,18 @@ def main() -> int:
     print("[5/6] Metadata oluşturuluyor...")
     preprocessor = pipeline.named_steps["preprocessor"]
     pipeline_input_order = list(X_train.columns)
+    transformed_display_names = clean_transformed_names(preprocessor)
+
+    # Feature etkisi ölçümü fairness bölümünden ÖNCE hesaplanır: fairness
+    # beyanı bu ölçüme dayanıyor (beyan edilen ile ölçülen ayrı alanlar).
+    feature_influence = build_feature_influence(pipeline, transformed_display_names)
+    n_dead = feature_influence["summary"]["n_without_influence"]
+    print(
+        f"      feature etkisi: {feature_influence['summary']['n_with_influence']} "
+        f"etkili / {n_dead} etkisiz (split=0)"
+    )
+    if n_dead:
+        print(f"      etkisiz: {', '.join(feature_influence['summary']['features_without_influence'])}")
     metadata = {
         "model_name": "insurance-fraud-detection",
         "model_version": "1.0.0",
@@ -728,13 +856,14 @@ def main() -> int:
             "numeric_features": num_cols,
             # ColumnTransformer çıktısındaki kolon sırası (SHAP eşlemesi için).
             "transformed_order": list(preprocessor.get_feature_names_out()),
-            "transformed_display_names": clean_transformed_names(preprocessor),
+            "transformed_display_names": transformed_display_names,
             "dropped_columns": DROP_COLS,
             "derived_features": dict(DATE_YEAR_FEATURES),
             "target": TARGET,
         },
+        "feature_influence": feature_influence,
         "preprocessing_contract": build_preprocessing_contract(pipeline_input_order),
-        "fairness": build_fairness_section(cat_cols, num_cols),
+        "fairness": build_fairness_section(cat_cols, num_cols, feature_influence),
         "defaults": build_defaults(X_train, cat_cols),
         "training_ranges": build_training_ranges(X_train, pipeline, cat_cols, num_cols),
         "model_params": {

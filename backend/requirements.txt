@@ -55,6 +55,22 @@ h11==0.16.0               # uvicorn
 click==8.4.2              # uvicorn
 idna==3.18
 
-# --- Test bağımlılıkları ---
-# pytest / httpx Faz 1'de backend/tests/ ile birlikte eklenecek. Production
-# imajına test paketi kurulmaz.
+# --- Test bağımlılıkları (Faz 1) ---
+# SADECE geliştirme/CI içindir. Dockerfile bu bloğu kurmamalı; production
+# imajına test paketi girmez (imaj boyutu + gereksiz saldırı yüzeyi).
+#
+# Sürümler `pip freeze` çıktısından birebir alınmıştır, tahmin edilmemiştir.
+# `httpx`, `fastapi.testclient.TestClient`'ın çalışma zamanı bağımlılığıdır —
+# doğrudan import etmiyoruz ama o olmadan TestClient hiç kurulamaz.
+pytest==9.1.1
+iniconfig==2.3.0          # pytest
+pluggy==1.6.0             # pytest
+httpx==0.28.1             # fastapi.testclient
+httpcore==1.0.9           # httpx
+certifi==2026.6.17        # httpx
+
+# NOT: starlette 1.3.1, httpx ile kullanıldığında bir StarletteDeprecation
+# uyarısı basıyor ("install httpx2 instead"). Testler çalışıyor; httpx2'ye
+# geçiş bilinçli olarak ERTELENDİ — Faz 1'in konusu değil ve pin edilmiş bir
+# sürüm setini test istemcisi için değiştirmek pickle uyumluluğunu riske
+# atmadan yapılacak ayrı bir iş.

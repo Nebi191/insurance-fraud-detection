@@ -1,0 +1,16 @@
+# Ruff yapılandırması — yalnızca backend/ için geçerli (ruff config'i dosyadan
+# yukarı doğru arar, frontend/ etkilenmez).
+#
+# NEDEN BU DOSYA VAR:
+# Yapılandırma olmadan ruff `app` paketini üçüncü-parti sanıyor ve
+# `from app.model import ...` satırlarını `fastapi` importlarının arasına
+# alfabetik olarak sıralamak istiyordu. Bu bir stil tercihi değil, ruff'ın
+# proje düzenini bilmemesiydi: `src` ile paket kökünü göstererek gerçeği
+# söylüyoruz. Kural susturmuyoruz — kural seti ruff'ın varsayılanı (E4/E7/E9/F).
+#
+# `src` bu dosyanın bulunduğu dizine görelidir: backend/ altında `app/` var,
+# dolayısıyla `app` birinci-parti olarak tanınır.
+src = ["."]
+
+[lint.isort]
+known-first-party = ["app"]
