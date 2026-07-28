@@ -1,9 +1,9 @@
 /**
- * Açık/koyu tema anahtarı.
+ * Light/dark theme switch.
  *
- * İlk değer `index.html` içindeki inline script tarafından zaten uygulanmış
- * durumda (FOUC önleme). Buradaki hook yalnızca o durumu React'e taşır ve
- * değişikliği hem DOM'a hem localStorage'a yazar.
+ * The initial value has already been applied by the inline script in
+ * `index.html` (to avoid a flash of the wrong theme). This hook only lifts that
+ * state into React and writes changes to both the DOM and localStorage.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -35,9 +35,9 @@ export function ThemeToggle({ theme, toggle }: { theme: Theme; toggle: () => voi
     <button
       type="button"
       onClick={toggle}
-      // Salt ikonlu düğme — ekran okuyucu için erişilebilir ad şart.
-      aria-label={isDark ? "Açık temaya geç" : "Koyu temaya geç"}
-      title={isDark ? "Açık temaya geç" : "Koyu temaya geç"}
+      // Icon-only button — an accessible name is mandatory for screen readers.
+      aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
+      title={isDark ? "Switch to light theme" : "Switch to dark theme"}
       className="rounded-lg border border-slate-300 p-2 text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
     >
       {isDark ? (

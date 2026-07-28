@@ -1,20 +1,20 @@
-# Backend runtime + training bağımlılıkları — Faz 0'da dondurulmuş sürümler.
+# Backend runtime + training dependencies — versions frozen in Phase 0.
 #
-# NEDEN HEPSİ `==` İLE PİNLİ:
-# `models/pipeline.pkl` bir joblib/pickle dosyasıdır ve içinde scikit-learn,
-# numpy, scipy ve lightgbm sınıflarının o anki hâlleri serileşmiştir. Docker
-# imajında farklı bir minor sürüm çözülürse pickle ya `AttributeError` /
-# `ModuleNotFoundError` ile açılmaz ya da (daha kötüsü) sessizce farklı davranır
-# ve deploy çöker. Sürümler `pip freeze` çıktısından birebir alınmıştır —
-# tahmin edilmemiştir.
+# WHY EVERYTHING IS PINNED WITH `==`:
+# `models/pipeline.pkl` is a joblib/pickle file, and the then-current classes of
+# scikit-learn, numpy, scipy and lightgbm are serialised inside it. If a
+# different minor version is resolved in the Docker image, the pickle either
+# fails to load with `AttributeError` / `ModuleNotFoundError`, or — worse —
+# behaves differently in silence and the deploy breaks. The versions are taken
+# verbatim from `pip freeze` output; none of them were guessed.
 #
-# PYTHON SÜRÜMÜ: 3.14.6 (pipeline.pkl bu yorumlayıcıyla üretildi).
-# Dockerfile `python:3.14-slim` tabanını kullanmalı. Daha eski bir Python
-# (ör. 3.11) pickle'ı açmayı deneyebilir ama garanti değildir.
-# Güncel eğitim ortamı bilgisi ayrıca models/metadata.json ->
-# library_versions altında da tutulur.
+# PYTHON VERSION: 3.14.6 (pipeline.pkl was produced with this interpreter).
+# The Dockerfile must use the `python:3.14-slim` base. An older Python (3.11,
+# say) may be able to open the pickle, but that is not guaranteed.
+# The current training environment is also recorded in models/metadata.json ->
+# library_versions.
 
-# --- Model / pipeline (pickle uyumluluğu açısından kritik) ---
+# --- Model / pipeline (critical for pickle compatibility) ---
 scikit-learn==1.9.0
 lightgbm==4.6.0
 numpy==2.4.6
@@ -23,19 +23,19 @@ pandas==3.0.3
 joblib==1.5.3
 
 # --- Explainability ---
-# SHAP çıktısı ham JSON olarak servis edilir; matplotlib BİLEREK yoktur.
-# shap 0.52 matplotlib'i zorunlu bağımlılık olarak istemez, dolayısıyla
-# imaja grafik yığını girmez.
+# SHAP output is served as raw JSON; matplotlib is DELIBERATELY absent. shap 0.52
+# does not require matplotlib as a hard dependency, so no plotting stack enters
+# the image.
 shap==0.52.0
 
-# --- API (Faz 1) ---
+# --- API (Phase 1) ---
 fastapi==0.139.2
 pydantic==2.13.4
 uvicorn==0.51.0
 starlette==1.3.1
 
-# --- Transitive, ama sürüm sürprizi yaşamamak için açıkça pinli ---
-narwhals==2.24.0          # scikit-learn 1.9 dataframe interchange katmanı
+# --- Transitive, but pinned explicitly to avoid version surprises ---
+narwhals==2.24.0          # scikit-learn 1.9 dataframe interchange layer
 threadpoolctl==3.6.0      # scikit-learn
 python-dateutil==2.9.0.post0
 tzdata==2026.3
@@ -43,7 +43,7 @@ packaging==26.2
 cloudpickle==3.1.2        # shap
 llvmlite==0.48.0          # shap -> numba
 numba==0.66.0             # shap
-slicer==0.0.8             # shap Explanation nesnesi
+slicer==0.0.8             # shap Explanation object
 tqdm==4.68.4              # shap
 annotated-types==0.7.0    # pydantic
 annotated-doc==0.0.4      # fastapi
@@ -55,13 +55,13 @@ h11==0.16.0               # uvicorn
 click==8.4.2              # uvicorn
 idna==3.18
 
-# --- Test bağımlılıkları (Faz 1) ---
-# SADECE geliştirme/CI içindir. Dockerfile bu bloğu kurmamalı; production
-# imajına test paketi girmez (imaj boyutu + gereksiz saldırı yüzeyi).
+# --- Test dependencies (Phase 1) ---
+# FOR DEVELOPMENT/CI ONLY. The Dockerfile must not install this block; no test
+# package belongs in a production image (image size + needless attack surface).
 #
-# Sürümler `pip freeze` çıktısından birebir alınmıştır, tahmin edilmemiştir.
-# `httpx`, `fastapi.testclient.TestClient`'ın çalışma zamanı bağımlılığıdır —
-# doğrudan import etmiyoruz ama o olmadan TestClient hiç kurulamaz.
+# The versions are taken verbatim from `pip freeze` output; none were guessed.
+# `httpx` is a runtime dependency of `fastapi.testclient.TestClient` — we never
+# import it directly, but TestClient cannot be constructed without it.
 pytest==9.1.1
 iniconfig==2.3.0          # pytest
 pluggy==1.6.0             # pytest
@@ -69,8 +69,8 @@ httpx==0.28.1             # fastapi.testclient
 httpcore==1.0.9           # httpx
 certifi==2026.6.17        # httpx
 
-# NOT: starlette 1.3.1, httpx ile kullanıldığında bir StarletteDeprecation
-# uyarısı basıyor ("install httpx2 instead"). Testler çalışıyor; httpx2'ye
-# geçiş bilinçli olarak ERTELENDİ — Faz 1'in konusu değil ve pin edilmiş bir
-# sürüm setini test istemcisi için değiştirmek pickle uyumluluğunu riske
-# atmadan yapılacak ayrı bir iş.
+# NOTE: starlette 1.3.1 emits a StarletteDeprecation warning when used with httpx
+# ("install httpx2 instead"). The tests run fine; migrating to httpx2 was
+# DELIBERATELY DEFERRED — it is not Phase 1's subject, and changing a pinned
+# version set for the sake of the test client is separate work to be done without
+# risking pickle compatibility.

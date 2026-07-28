@@ -2,7 +2,7 @@
   "model_name": "insurance-fraud-detection",
   "model_version": "1.0.0",
   "algorithm": "LightGBM (LGBMClassifier)",
-  "trained_at": "2026-07-27T17:00:28+00:00",
+  "trained_at": "2026-07-28T11:07:56+00:00",
   "dataset": {
     "source_file": "insurance_claims.csv",
     "n_rows": 1000,
@@ -55,7 +55,7 @@
       "incident_year",
       "policy_bind_year"
     ],
-    "pipeline_input_order_description": "pipeline.predict_proba()'ya verilecek DataFrame'in kolon adları ve sırası. Ham CSV şeması DEĞİLDİR: preprocessing_contract.caller_must_apply_before_predict adımları uygulandıktan SONRAKİ şemadır.",
+    "pipeline_input_order_description": "The column names and order of the DataFrame to be handed to pipeline.predict_proba(). This is NOT the raw CSV schema: it is the schema AFTER the preprocessing_contract.caller_must_apply_before_predict steps have been applied.",
     "categorical_features": [
       "policy_state",
       "policy_csl",
@@ -182,9 +182,9 @@
     "target": "fraud_reported"
   },
   "feature_influence": {
-    "description": "Eğitilmiş LightGBM booster'ından ölçülen feature etkisi. split_count = ağaçlarda bu kolon üzerinde yapılan bölünme sayısı, gain = bu bölünmelerin toplam kazancı, has_influence = split_count > 0.",
+    "description": "Feature influence measured from the trained LightGBM booster. split_count = the number of splits made on this column across the trees, gain = the total gain of those splits, has_influence = split_count > 0.",
     "measured_from": "lightgbm booster_.feature_importance(importance_type='split'|'gain')",
-    "interpretation_note": "has_influence=false olan bir feature bu EĞİTİLMİŞ modelde hiçbir tahmini etkilemez; SHAP katkısı her zaman tam 0.0'dır. Bu, feature'ın modele verilmediği anlamına GELMEZ — verildi, ağaçlar kullanmadı. Model yeniden eğitilirse (farklı veri, farklı seed, farklı hiperparametre) bu liste değişebilir.",
+    "interpretation_note": "A feature with has_influence=false cannot affect any prediction in THIS TRAINED model; its SHAP contribution is always exactly 0.0. That does NOT mean the feature was withheld from the model — it was given, and the trees did not use it. If the model is retrained (different data, seed or hyperparameters) this list may change.",
     "summary": {
       "n_features": 34,
       "n_with_influence": 18,
@@ -382,11 +382,11 @@
     }
   },
   "preprocessing_contract": {
-    "summary": "pipeline.pkl imputasyon ve encoding'i kapsar; ham CSV şemasından pipeline girdisine geçişi KAPSAMAZ. Çağıran (API katmanı) aşağıdaki adımları pipeline'a vermeden ÖNCE uygulamak zorundadır.",
+    "summary": "pipeline.pkl covers imputation and encoding; it DOES NOT cover the step from the raw CSV schema to the pipeline input. The caller (the API layer) must apply the steps below BEFORE handing anything to the pipeline.",
     "inside_pipeline": [
       "categorical_imputation: SimpleImputer(strategy='most_frequent')",
       "categorical_encoding: OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)",
-      "numeric_passthrough: imputasyon yok, LightGBM NaN'ı native taşır"
+      "numeric_passthrough: no imputation, LightGBM carries NaN natively"
     ],
     "caller_must_apply_before_predict": [
       {
@@ -400,7 +400,7 @@
           "_c39",
           "auto_model"
         ],
-        "reason": "PII, ham tarihler, boş artık kolon ve yüksek kardinaliteli auto_model."
+        "reason": "PII, raw dates, the empty trailing column and the high-cardinality auto_model."
       },
       {
         "step": "derive_year_features",
@@ -408,7 +408,7 @@
           "incident_date": "incident_year",
           "policy_bind_date": "policy_bind_year"
         },
-        "reason": "Pipeline tarih parse etmez; yıl feature'ı dışarıda türetilir."
+        "reason": "The pipeline does not parse dates; the year feature is derived outside it."
       },
       {
         "step": "question_mark_to_nan",
@@ -417,7 +417,7 @@
           "police_report_available",
           "collision_type"
         ],
-        "reason": "Bu kolonlarda eksik değer '?' string'i olarak kodlanmış. Dönüştürülmezse encoder '?' değerini bilinmeyen kategori sayıp -1'e kodlar ve imputer devreye girmez -> sessiz hatalı tahmin."
+        "reason": "In these columns a missing value is encoded as the '?' string. Without the conversion, the encoder treats '?' as an unknown category and encodes it to -1, and the imputer never runs -> a silently wrong prediction."
       },
       {
         "step": "order_columns",
@@ -457,20 +457,20 @@
           "incident_year",
           "policy_bind_year"
         ],
-        "reason": "Pipeline girdisi bu kolon adlarını ve sırasını bekler."
+        "reason": "The pipeline input expects these column names in this order."
       }
     ],
-    "note_on_encoding_ban": "Bu adımlar ŞEMA NORMALİZASYONUDUR, encoding değildir. Kategorik değerleri sayıya çevirmek hâlâ yalnızca pipeline'ın işidir."
+    "note_on_encoding_ban": "These steps are SCHEMA NORMALISATION, not encoding. Turning categorical values into numbers remains the pipeline's job alone."
   },
   "fairness": {
     "status": "declared_not_audited",
-    "field_semantics": "used_as_model_feature = feature modele VERİLDİ. has_influence = eğitilmiş ağaçlar bu kolonda gerçekten bölünme yaptı. İKİSİ AYNI ŞEY DEĞİLDİR: split_count=0 olan bir feature bu eğitilmiş modelde hiçbir tahmini etkilemez ve SHAP katkısı her zaman tam 0.0'dır. Bu ölçüm bir FAIRNESS DENETİMİ YERİNE GEÇMEZ: (1) model yeniden eğitilirse sonuç değişebilir, (2) vekil feature'lar (meslek, hobi, coğrafya) aynı sinyali dolaylı olarak geri taşıyabilir, (3) etkisi sıfır olmayan nitelikler için hiçbir grup bazlı metrik hesaplanmadı.",
+    "field_semantics": "used_as_model_feature = the feature was GIVEN to the model. has_influence = the trained trees actually split on this column. THESE ARE NOT THE SAME THING: a feature with split_count=0 cannot affect any prediction in this trained model, and its SHAP contribution is always exactly 0.0. This measurement IS NOT A SUBSTITUTE FOR A FAIRNESS AUDIT: (1) the result can change if the model is retrained, (2) proxy features (occupation, hobbies, geography) can carry the same signal back indirectly, (3) no group-level metric was computed for the attributes whose influence is not zero.",
     "protected_attributes_used_as_features": [
       {
         "feature": "insured_sex",
         "basis": "sex",
         "severity": "high",
-        "rationale": "Cinsiyet, çoğu yargı bölgesinde doğrudan korunan niteliktir. Model feature'ı olarak kullanılıyor; dolandırıcılık skoru cinsiyete göre değişebilir.",
+        "rationale": "Sex is a directly protected attribute in most jurisdictions. It is used as a model feature, so the fraud score can vary with sex.",
         "used_as_model_feature": true,
         "split_count": 0,
         "has_influence": false
@@ -479,7 +479,7 @@
         "feature": "age",
         "basis": "age",
         "severity": "high",
-        "rationale": "Yaş korunan niteliktir. Sigorta fiyatlamasında bazı yargı bölgelerinde aktüeryal gerekçeyle izinli olabilir, ancak dolandırıcılık *şüphesi* skorlamasında aynı muafiyet varsayılamaz.",
+        "rationale": "Age is a protected attribute. Some jurisdictions permit its use in insurance pricing on actuarial grounds, but the same exemption cannot be assumed for scoring the *suspicion* of fraud.",
         "used_as_model_feature": true,
         "split_count": 8,
         "has_influence": true
@@ -488,7 +488,7 @@
         "feature": "insured_relationship",
         "basis": "marital_and_familial_status",
         "severity": "medium",
-        "rationale": "Değerler (husband/wife/unmarried/own-child/...) medeni ve ailevi durumu doğrudan açık eder; bu birçok yargı bölgesinde korunan niteliktir. Ayrıca cinsiyet için güçlü bir vekildir (husband/wife -> insured_sex).",
+        "rationale": "The values (husband/wife/unmarried/own-child/...) directly disclose marital and familial status, which is a protected attribute in many jurisdictions. It is also a strong proxy for sex (husband/wife -> insured_sex).",
         "used_as_model_feature": true,
         "split_count": 0,
         "has_influence": false
@@ -497,7 +497,7 @@
         "feature": "insured_education_level",
         "basis": "socioeconomic_proxy",
         "severity": "medium",
-        "rationale": "Klasik anlamda korunan sınıf değil, ancak sosyoekonomik köken ve dolaylı olarak ırk/ulusal köken için iyi belgelenmiş bir vekildir. Ayrımcılık denetiminde vekil değişken olarak ele alınmalıdır.",
+        "rationale": "Not a protected class in the classic sense, but a well-documented proxy for socioeconomic background and, indirectly, race/national origin. It should be treated as a proxy variable in a discrimination audit.",
         "used_as_model_feature": true,
         "split_count": 12,
         "has_influence": true
@@ -507,7 +507,7 @@
       {
         "feature": "insured_occupation",
         "basis": "socioeconomic_proxy",
-        "rationale": "Meslek; gelir, eğitim ve demografi için güçlü vekildir.",
+        "rationale": "Occupation is a strong proxy for income, education and demographics.",
         "used_as_model_feature": true,
         "split_count": 10,
         "has_influence": true
@@ -515,7 +515,7 @@
       {
         "feature": "insured_hobbies",
         "basis": "lifestyle_proxy",
-        "rationale": "SHAP'ta yüksek etkili çıkıyor; yaşam tarzı/kültürel köken vekili olabilir ve nedensel bir dolandırıcılık gerekçesi yoktur.",
+        "rationale": "It shows high influence in SHAP; it may proxy lifestyle or cultural background, and there is no causal fraud rationale behind it.",
         "used_as_model_feature": true,
         "split_count": 353,
         "has_influence": true
@@ -523,7 +523,7 @@
       {
         "feature": "policy_state",
         "basis": "geographic_proxy",
-        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "rationale": "Geographic features carry a redlining-like indirect discrimination risk.",
         "used_as_model_feature": true,
         "split_count": 0,
         "has_influence": false
@@ -531,7 +531,7 @@
       {
         "feature": "incident_state",
         "basis": "geographic_proxy",
-        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "rationale": "Geographic features carry a redlining-like indirect discrimination risk.",
         "used_as_model_feature": true,
         "split_count": 0,
         "has_influence": false
@@ -539,7 +539,7 @@
       {
         "feature": "incident_city",
         "basis": "geographic_proxy",
-        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "rationale": "Geographic features carry a redlining-like indirect discrimination risk.",
         "used_as_model_feature": true,
         "split_count": 15,
         "has_influence": true
@@ -549,12 +549,12 @@
     "audit_metrics_computed": [],
     "intended_use": "demo_and_portfolio_only",
     "production_requirements": [
-      "Korunan nitelik başına grup bazlı fairness denetimi koş (ör. demografik parite farkı, eşitlenmiş fırsat / TPR-FPR farkı, kalibrasyon farkı).",
-      "Korunan niteliği düşürmenin ayrımcılığı gerçekten azaltıp azaltmadığını ölç: vekil feature'lar (meslek, hobi, coğrafya) sinyali geri taşıyabilir.",
-      "İnsan gözden geçirmesi zorunlu: model çıktısı bir talebi tek başına reddetmek için değil, önceliklendirme/triyaj için kullanılmalı.",
-      "Yerel düzenlemeyle uyumu doğrula (ör. AB AI Act yüksek riskli sistem yükümlülükleri, ABD eyalet sigorta ayrımcılık mevzuatı)."
+      "Run a group-level fairness audit per protected attribute (e.g. demographic parity difference, equalised odds / TPR-FPR gap, calibration gap).",
+      "Measure whether dropping a protected attribute actually reduces discrimination: proxy features (occupation, hobbies, geography) can carry the signal back.",
+      "Human review is mandatory: model output must be used for prioritisation/triage, never to decline a claim on its own.",
+      "Verify compliance with local regulation (e.g. EU AI Act high-risk system obligations, US state insurance anti-discrimination law)."
     ],
-    "notes": "Model bu feature'larla eğitildi ve Faz 0'da bilinçli olarak öyle bırakıldı: amaç yayınlanan modeli SADIK biçimde yeniden üretmekti. Bu bölüm bir uyumluluk beyanı değil, bilinen riskin açık kaydıdır.\n\nÖLÇÜM NOTU: bu eğitilmiş modelde bazı korunan/vekil niteliklerin split_count değeri 0'dır, yani ölçülen etkileri sıfırdır (her SHAP katkısı tam 0.0). Bu, modelin adil olduğu ya da ilgili nitelikle ayrımcılık yapmadığı ANLAMINA GELMEZ. Söylenebilecek tek şey, bu feature'ların bu spesifik eğitilmiş ağaç kümesindeki ölçülen etkisinin sıfır olduğudur. Etkisi sıfır olmayan nitelikler için hiçbir grup bazlı fairness metriği hesaplanmadı; audit_performed hâlâ false ve aşağıdaki production_requirements maddeleri aynen geçerlidir."
+    "notes": "The model was trained with these features and Phase 0 deliberately left it that way: the goal was to reproduce the published model FAITHFULLY. This section is not a compliance statement but an open record of a known risk.\n\nMEASUREMENT NOTE: in this trained model some protected/proxy attributes have a split_count of 0, meaning their measured influence is zero (every SHAP contribution is exactly 0.0). That DOES NOT MEAN the model is fair, or that it does not discriminate on the attribute in question. The only thing that can be said is that the measured influence of those features in this specific set of trained trees is zero. No group-level fairness metric was computed for the attributes whose influence is not zero; audit_performed is still false and the production_requirements items below apply in full."
   },
   "defaults": {
     "months_as_customer": {

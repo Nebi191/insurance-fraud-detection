@@ -1,42 +1,43 @@
-# SADECE `notebooks/` keşif ortamı içindir — production değildir.
+# FOR THE `notebooks/` EXPLORATION ENVIRONMENT ONLY — this is not production.
 #
-# Bu dosya, 01-05 numaralı keşif notebook'larını (EDA, preprocessing denemeleri,
-# LightGBM/XGBoost karşılaştırması, Optuna HPO, SHAP analizi) yeniden koşabilmek
-# için gereken paketleri listeler. Repo kökünden `notebooks/requirements.txt`
-# olarak buraya taşındı; kökte durduğu sürece backend'in gerçek bağımlılık
-# dosyasıyla karıştırılıyordu.
+# This file lists the packages needed to re-run the exploration notebooks 01-05
+# (EDA, preprocessing experiments, LightGBM/XGBoost comparison, Optuna HPO, SHAP
+# analysis). It was moved here from the repository root as
+# `notebooks/requirements.txt`; while it sat at the root it kept being confused
+# with the backend's real dependency file.
 #
-# BACKEND BU DOSYAYI KULLANMAZ.
-# Backend (FastAPI + pipeline.pkl) kendi dosyasını kullanır:
-#     backend/requirements.txt   -> hepsi `==` ile pinli
-# Oradaki pinler `pipeline.pkl` pickle uyumluluğu için kritiktir; buradaki
-# gevşek `>=` aralıkları o dosyaya ASLA taşınmamalı. Docker imajı da yalnızca
-# backend/requirements.txt'ten kurulur.
+# THE BACKEND DOES NOT USE THIS FILE.
+# The backend (FastAPI + pipeline.pkl) uses its own:
+#     backend/requirements.txt   -> everything pinned with `==`
+# Those pins are critical for `pipeline.pkl` compatibility; the loose `>=` ranges
+# here must NEVER be carried into that file. The Docker image is likewise built
+# only from backend/requirements.txt.
 #
-# Buradaki aralıklar bilerek gevşek: notebook'lar keşif amaçlı, artefakt
-# üretmiyorlar (yayınlanan model `backend/train_pipeline.py` tarafından
-# üretilir), dolayısıyla tam sürüm kilidi gerektirmiyorlar.
+# The ranges here are deliberately loose: the notebooks are exploratory and do
+# not produce artifacts (the published model is produced by
+# `backend/train_pipeline.py`), so they do not need an exact version lock.
 #
-# NOT: `streamlit` çıkarıldı — kökteki Streamlit prototipi (`app.py`) silindi,
-# yerini FastAPI backend + React frontend aldı.
+# NOTE: `streamlit` was removed — the Streamlit prototype at the repository root
+# (`app.py`) was deleted and replaced by the FastAPI backend + React frontend.
 
-# --- Veri / model ---
+# --- Data / model ---
 pandas>=2.0
 numpy>=1.24
 scikit-learn>=1.3
 lightgbm>=4.0
-xgboost>=2.0          # notebook 04, LightGBM ile karşılaştırma
-optuna>=3.0           # notebook 03, TPE hiperparametre optimizasyonu
+xgboost>=2.0          # notebook 04, comparison against LightGBM
+optuna>=3.0           # notebook 03, TPE hyperparameter optimisation
 joblib>=1.3
 
 # --- Explainability ---
-# Notebook'ta SHAP grafikleri matplotlib ile çizilir. Backend'de ise SHAP ham
-# JSON olarak servis edilir ve matplotlib BİLEREK kurulmaz — fark burada.
+# In the notebooks, SHAP charts are drawn with matplotlib. In the backend SHAP is
+# served as raw JSON and matplotlib is DELIBERATELY not installed — that is the
+# difference.
 shap>=0.44
 
-# --- Görselleştirme ---
+# --- Visualisation ---
 matplotlib>=3.7
 seaborn>=0.12
 
-# --- Notebook çalıştırma ortamı ---
+# --- Notebook runtime ---
 jupyter>=1.0

@@ -1,13 +1,14 @@
-"""FastAPI servis katmanı (Faz 1).
+"""FastAPI service layer (Phase 1).
 
-Paket üç sorumluluğa ayrılmıştır:
+The package is split along three responsibilities:
 
-    schemas.py  -> API sözleşmesi. Girdinin *fiziksel/mantıksal* geçerliliğini
-                   doğrular (Pydantic). Model hakkında hiçbir şey bilmez.
-    model.py    -> Artefakt yükleme, şema normalizasyonu, tahmin, SHAP.
-                   HTTP hakkında hiçbir şey bilmez.
-    main.py     -> İkisini birleştiren ince HTTP katmanı (endpoint + CORS).
+    schemas.py  -> The API contract. Validates that input is *physically and
+                   logically* well formed (Pydantic). Knows nothing about the
+                   model.
+    model.py    -> Artifact loading, schema normalisation, prediction, SHAP.
+                   Knows nothing about HTTP.
+    main.py     -> The thin HTTP layer that joins the two (endpoints + CORS).
 
-Bu ayrımın amacı, `model.py`'ı FastAPI'siz de test edilebilir bırakmak ve
-"validation nerede yapılıyor?" sorusunun tek bir cevabı olmasıdır.
+The point of the split is to keep `model.py` testable without FastAPI, and to
+make "where does validation happen?" a question with exactly one answer.
 """

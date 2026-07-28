@@ -1,51 +1,53 @@
-"""FastAPI uygulaması — `/predict`, `/health`, `/model-info`.
+"""FastAPI application — `/predict`, `/health`, `/model-info`.
 
-NE YAPAR, NEDEN BÖYLE YAPAR
----------------------------
+WHAT IT DOES, AND WHY IT DOES IT THIS WAY
+-----------------------------------------
 
-1) İNCE KATMAN
-   Burada iş mantığı YOKTUR. Endpoint'ler yalnızca (a) doğrulanmış isteği
-   `ModelBundle`'a verir, (b) sonucu sözleşmedeki şemaya sokar. Skorlama,
-   imputasyon ve SHAP `model.py`'ın; girdi doğrulaması `schemas.py`'ın işi.
-   Böylece `model.py` HTTP olmadan da test edilebilir kalır.
+1) A THIN LAYER
+   There is NO business logic here. The endpoints only (a) hand the validated
+   request to `ModelBundle`, and (b) shape the result into the contract schema.
+   Scoring, imputation and SHAP belong to `model.py`; input validation belongs to
+   `schemas.py`. That keeps `model.py` testable without HTTP.
 
-2) `lifespan` İLE TEK SEFERLİK YÜKLEME (K1)
-   Artefakt uygulama açılışında bir kez yüklenir. Dosya yoksa veya metadata
-   tutarsızsa `ModelBundle.load()` fırlatır ve uygulama HİÇ açılmaz
-   (fail-fast). "Ayakta ama her isteğe 500 dönen" bir servis, healthcheck'i
-   yeşil gösterdiği için açılmayandan daha tehlikelidir.
+2) LOADED ONCE VIA `lifespan` (K1)
+   The artifact is loaded once at application startup. If a file is missing or
+   the metadata is inconsistent, `ModelBundle.load()` raises and the application
+   does NOT start (fail-fast). A service that is "up but returns 500 to every
+   request" is more dangerous than one that never starts, because it shows a
+   green healthcheck.
 
-3) `create_app()` FABRİKASI — TEST EDİLEBİLİRLİK İÇİN
-   Uygulama bir fabrika fonksiyonunda kurulur; `app = create_app()` yalnızca
-   modül düzeyinde bir örnektir (uvicorn hedefi `app.main:app` bozulmaz).
+3) THE `create_app()` FACTORY — FOR TESTABILITY
+   The application is built inside a factory function; `app = create_app()` is
+   merely a module-level instance (so the uvicorn target `app.main:app` still
+   works).
 
-   NEDEN ÖNEMLİ: eskiden CORS origin'leri modül import edilirken bir kez
-   okunuyordu. Bu, kablolamanın test edilemez olması demekti — origin listesini
-   sabit kodlayan, `allow_methods=["*"]` yapan ya da `allow_credentials=True`
-   açan bir değişikliği hiçbir test yakalayamıyordu. Fabrika sayesinde testler
-   farklı ortam değişkenleriyle YENİ bir uygulama kurup gerçek `Origin`
-   başlıklı istekle davranışı doğrulayabiliyor. Faz 7'nin bitti kriteri
-   doğrudan bu yola bağlı; test edilemeyen yol, test edilmemiş yoldur.
+   WHY IT MATTERS: the CORS origins used to be read once, at module import time.
+   That made the wiring untestable — no test could catch a change that hard-coded
+   the origin list, set `allow_methods=["*"]`, or turned on
+   `allow_credentials=True`. With the factory, tests can build a FRESH
+   application with different environment variables and verify the behaviour with
+   a real `Origin`-carrying request. Phase 7's completion criterion depends
+   directly on this path, and an untestable path is an untested path.
 
-4) CORS: WILDCARD YASAK VE BU KOD TARAFINDAN ZORLANIR (K10)
-   `allow_origins=["*"]` kullanılmaz. Daha da önemlisi: bu kural artık yalnızca
-   VARSAYILAN değerde değil, ortam değişkeni yolunda da geçerli.
-   `ALLOWED_ORIGINS="*"` ile deploy etmeye çalışmak açılışta patlar. Aksi hâlde
-   K10 sadece bir niyet beyanı olurdu; tek bir ortam değişkeniyle delinebilen
-   bir güvenlik kuralı, güvenlik kuralı değildir.
+4) CORS: NO WILDCARDS, ENFORCED BY THIS CODE (K10)
+   `allow_origins=["*"]` is never used. More importantly, that rule now applies
+   on the environment-variable path too, not just to the DEFAULT: trying to
+   deploy with `ALLOWED_ORIGINS="*"` fails at startup. Otherwise K10 would be a
+   statement of intent only — and a security rule that a single environment
+   variable can punch through is not a security rule.
 
-5) HATA GÖVDESİ İSTEMCİ VERİSİNİ GERİ YANSITMAZ
-   Pydantic'in varsayılan 422 gövdesi `input` alanında gönderilen ham değeri
-   geri yollar. Bu API'nin gövdesi sigorta talebi verisidir; hatalı bir istek
-   log'lara, ters proxy'lere ve tarayıcı konsoluna kişisel veri yansıtırdı.
-   `validation_exception_handler` `input`/`ctx` alanlarını düşürür, `loc` ve
-   `msg`'i korur (frontend hâlâ alan bazlı hata gösterebilir).
+5) THE ERROR BODY NEVER ECHOES CLIENT DATA
+   Pydantic's default 422 body returns the submitted raw value in an `input`
+   field. This API's body is insurance claim data; a bad request would reflect
+   personal data into logs, reverse proxies and the browser console.
+   `validation_exception_handler` drops the `input`/`ctx` fields and keeps `loc`
+   and `msg` (so the frontend can still show per-field errors).
 
-6) SENKRON `def` ENDPOINT'LER — BİLİNÇLİ
-   Tahmin CPU-bound'dur (LightGBM + SHAP, C uzantısı). `async def` içine
-   koysaydık event loop'u bloklardı ve tek yavaş istek tüm sunucuyu
-   durdururdu. Senkron `def` tanımlayınca FastAPI bunları thread havuzunda
-   koşturur; event loop serbest kalır.
+6) SYNCHRONOUS `def` ENDPOINTS — DELIBERATE
+   Prediction is CPU-bound (LightGBM + SHAP, C extensions). Putting it inside an
+   `async def` would block the event loop, and a single slow request would stall
+   the whole server. Declaring them as synchronous `def` makes FastAPI run them
+   in a thread pool, leaving the event loop free.
 """
 
 from __future__ import annotations
@@ -78,34 +80,34 @@ from app.schemas import (
 )
 
 # --------------------------------------------------------------------------- #
-# CORS yapılandırması
+# CORS configuration
 # --------------------------------------------------------------------------- #
 
 ALLOWED_ORIGINS_ENV = "ALLOWED_ORIGINS"
 
-# Vite dev sunucusu. Faz 7'de Netlify production origin'i (ör.
-# "https://<site>.netlify.app") ALLOWED_ORIGINS ortam değişkenine eklenecek —
-# kod değişmeyecek, sadece HF Spaces'teki değişken güncellenecek.
+# The Vite dev server. In Phase 7 the Netlify production origin (e.g.
+# "https://<site>.netlify.app") will be added to the ALLOWED_ORIGINS environment
+# variable — no code change, only an update to the variable on HF Spaces.
 DEFAULT_ALLOWED_ORIGINS = "http://localhost:5173"
 
 
 class CorsConfigurationError(ValueError):
-    """CORS yapılandırması güvenli değil — uygulama açılmamalı."""
+    """The CORS configuration is unsafe — the application must not start."""
 
 
 def get_allowed_origins() -> list[str]:
-    """`ALLOWED_ORIGINS` ortam değişkenini virgülle ayrılmış listeye çevirir.
+    """Parses the `ALLOWED_ORIGINS` environment variable into a comma-separated list.
 
-    İKİ HATALI YAPILANDIRMAYI AÇILIŞTA PATLATIR:
+    IT FAILS AT STARTUP ON TWO BAD CONFIGURATIONS:
 
-      `ALLOWED_ORIGINS="*"`  -> K10'un yasakladığı wildcard. Buradaki kontrol
-          olmadan kural sadece varsayılan değerde geçerli olurdu; tek bir ortam
-          değişkeniyle her siteye kapı açılırdı.
-      `ALLOWED_ORIGINS=""`   -> değişken SET EDİLMİŞ ama hiçbir origin
-          çözülmüyor. Sessizce tüm tarayıcı istemcilerini kapatır ve deploy'da
-          teşhisi en zor hata türüdür ("API ayakta, healthcheck yeşil, ama
-          frontend hiçbir şey çekemiyor"). Değişken hiç SET EDİLMEMİŞSE bu
-          hata değildir — varsayılan devreye girer.
+      `ALLOWED_ORIGINS="*"`  -> the wildcard K10 forbids. Without this check the
+          rule would only hold for the default value; a single environment
+          variable would open the door to every site.
+      `ALLOWED_ORIGINS=""`   -> the variable IS SET but resolves to no origin at
+          all. This silently shuts out every browser client and is the hardest
+          class of deploy bug to diagnose ("the API is up, the healthcheck is
+          green, but the frontend cannot fetch anything"). If the variable is NOT
+          SET at all, that is not an error — the default applies.
     """
     raw = os.getenv(ALLOWED_ORIGINS_ENV)
     explicitly_configured = raw is not None
@@ -117,64 +119,66 @@ def get_allowed_origins() -> list[str]:
     wildcards = [origin for origin in origins if "*" in origin]
     if wildcards:
         raise CorsConfigurationError(
-            f"{ALLOWED_ORIGINS_ENV} wildcard içeremez (bulunan: {wildcards}). "
-            "Her origin'i tam olarak yazın, ör. "
-            "ALLOWED_ORIGINS='http://localhost:5173,https://siteniz.netlify.app'. "
-            "Alt alan adı deseni gerekiyorsa CORSMiddleware'in allow_origin_regex "
-            "parametresi kullanılmalıdır — allow_origins glob desteklemez."
+            f"{ALLOWED_ORIGINS_ENV} must not contain a wildcard (found: {wildcards}). "
+            "Spell out every origin in full, e.g. "
+            "ALLOWED_ORIGINS='http://localhost:5173,https://your-site.netlify.app'. "
+            "If a subdomain pattern is required, use CORSMiddleware's "
+            "allow_origin_regex parameter — allow_origins does not support globs."
         )
 
     if explicitly_configured and not origins:
         raise CorsConfigurationError(
-            f"{ALLOWED_ORIGINS_ENV} tanımlı ama hiçbir geçerli origin içermiyor "
-            f"(ham değer: {raw!r}). Bu, bütün tarayıcı istemcilerini sessizce "
-            "engellerdi. En az bir origin yazın ya da varsayılanı kullanmak için "
-            f"{ALLOWED_ORIGINS_ENV} değişkenini tamamen kaldırın."
+            f"{ALLOWED_ORIGINS_ENV} is set but contains no valid origin "
+            f"(raw value: {raw!r}). This would silently block every browser "
+            "client. Provide at least one origin, or remove the "
+            f"{ALLOWED_ORIGINS_ENV} variable entirely to use the default."
         )
 
     return origins
 
 
 # --------------------------------------------------------------------------- #
-# İstek gövdesi boyut sınırı
+# Request body size limit
 # --------------------------------------------------------------------------- #
 
-# Tek bir talep JSON'u 2 KB'nin altında. 64 KB, olası bir alan genişlemesine
-# rahat yer bırakırken sunucuyu megabaytlarca gövdeyi belleğe almaktan korur.
-# Starlette'in varsayılanında pratik bir sınır yoktur; kimlik doğrulaması
-# olmayan public bir endpoint için bu ucuz bir DoS yüzeyidir.
+# A single claim JSON is under 2 KB. 64 KB leaves comfortable room for the field
+# set to grow while keeping the server from pulling megabytes of body into
+# memory. Starlette's default has no practical limit; for a public endpoint with
+# no authentication that is a cheap DoS surface.
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 
-# Gövde BEKLEMEYEN metodlar (Codex C-1).
+# Methods that do NOT expect a body (Codex C-1).
 #
-# Sınırın akış bazlı kolu, downstream uygulamanın gövdeyi OKUMASINA bağlıydı:
-# sayaç yalnızca `receive()` çağrıldığında ilerliyor. `/health` ve `/model-info`
-# istek gövdesini hiç okumaz, dolayısıyla `Content-Length` göndermeyen (chunked)
-# bir istemci bu endpoint'lere sınırsız gövde akıtıp 200 alabiliyordu —
-# ölçüldü: 160 KB chunked gövde ile `GET /health` -> 200.
+# The streaming arm of the limit depended on the downstream application actually
+# READING the body: the counter only advances when `receive()` is called.
+# `/health` and `/model-info` never read the request body, so a client that sends
+# no `Content-Length` (chunked) could stream an unbounded body at those endpoints
+# and still get a 200 — measured: `GET /health` with a 160 KB chunked body -> 200.
 #
-# Bu metodlarda gövdeyi middleware'in KENDİSİ tüketip sayıyoruz. Maliyet
-# pratikte sıfır: normal bir GET'in gövdesi zaten boştur, döngü ilk mesajda biter.
+# For these methods the middleware ITSELF consumes and counts the body. The cost
+# is effectively zero: a normal GET has an empty body, so the loop ends on the
+# first message.
 BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
 
 
 class _BodyTooLarge(Exception):
-    """Gövde sınırı aşıldı (yalnızca middleware içinde kullanılır)."""
+    """The body limit was exceeded (used only inside the middleware)."""
 
 
 class BodySizeLimitMiddleware:
-    """Gövdesi `max_body_bytes`'ı aşan istekleri 413 ile reddeder.
+    """Rejects requests whose body exceeds `max_body_bytes` with a 413.
 
-    Ham ASGI middleware'i olarak yazıldı çünkü `BaseHTTPMiddleware` gövdeyi
-    zaten okuyup tamponlar — sınırı orada uygulamak, korumaya çalıştığımız
-    belleği önce harcamak olurdu.
+    Written as raw ASGI middleware because `BaseHTTPMiddleware` already reads and
+    buffers the body — applying the limit there would mean spending the very
+    memory we are trying to protect first.
 
-    İKİ AŞAMALI KORUMA:
-      1. `Content-Length` varsa istek daha okunmadan reddedilir (ucuz yol).
-      2. Başlık yoksa (chunked transfer encoding) gövde parçaları AKARKEN
-         sayılır ve sınır aşılır aşılmaz durdurulur. Sadece `Content-Length`'e
-         güvenmek, başlığı hiç göndermeyen bir istemciye sınırsız gövde hakkı
-         tanımak demekti.
+    TWO-STAGE PROTECTION:
+      1. If `Content-Length` is present, the request is rejected before it is
+         read at all (the cheap path).
+      2. If the header is absent (chunked transfer encoding), body chunks are
+         counted AS THEY STREAM and reading stops the moment the limit is
+         exceeded. Trusting `Content-Length` alone would grant an unbounded body
+         to any client that simply omits the header.
     """
 
     def __init__(self, app: Any, max_body_bytes: int = MAX_REQUEST_BODY_BYTES) -> None:
@@ -198,7 +202,8 @@ class BodySizeLimitMiddleware:
                     await self._reject(send)
                     return
             except ValueError:
-                # Bozuk Content-Length: başlığa güvenmeyip akışı sayarak ilerle.
+                # Malformed Content-Length: do not trust the header, count the
+                # stream instead.
                 pass
 
         if scope.get("method", "").upper() in BODYLESS_METHODS:
@@ -216,25 +221,26 @@ class BodySizeLimitMiddleware:
                 received += len(message.get("body", b""))
                 if received > self.max_body_bytes:
                     exceeded = True
-                    # Okumayı burada kesmek asıl korumadır: aksi hâlde tam da
-                    # engellemeye çalıştığımız bellek zaten harcanmış olurdu.
+                    # Cutting the read off here is the actual protection:
+                    # otherwise the memory we are trying to save has already been
+                    # spent.
                     raise _BodyTooLarge
             return message
 
         async def guarding_send(message: MutableMapping[str, Any]) -> None:
-            """Sınır aşıldıysa uygulamanın ürettiği yanıtı 413 ile değiştirir.
+            """Replaces the application's response with a 413 once the limit is hit.
 
-            NEDEN SADECE `except _BodyTooLarge` YETMİYOR:
-            FastAPI gövdeyi ayrıştırırken `except Exception` ile her hatayı
-            yakalayıp "There was an error parsing the body" diyen bir 400'e
-            çeviriyor. Yani istisnamız bize hiç ulaşmadan yutuluyordu ve
-            istemci yanıltıcı bir 400 alıyordu. Bayrağı GÖNDERİM yolunda
-            kontrol etmek, aradaki hiçbir katmanın davranışına bağlı olmayan
-            tek güvenilir nokta.
+            WHY `except _BodyTooLarge` ALONE IS NOT ENOUGH:
+            while parsing the body, FastAPI catches every error with
+            `except Exception` and turns it into a 400 saying "There was an error
+            parsing the body". Our exception was therefore swallowed before it
+            ever reached us, and the client got a misleading 400. Checking the
+            flag on the SEND path is the one reliable point that does not depend
+            on the behaviour of any layer in between.
             """
             nonlocal handled
             if handled:
-                return  # 413 gönderildi; uygulamanın kalan mesajlarını yut.
+                return  # The 413 was sent; swallow the application's remaining messages.
             if exceeded:
                 handled = True
                 await self._reject(send)
@@ -244,7 +250,7 @@ class BodySizeLimitMiddleware:
         try:
             await self.app(scope, counting_receive, guarding_send)
         except _BodyTooLarge:
-            # Hiçbir ara katman yutmadıysa buraya düşer.
+            # Reached only if no intermediate layer swallowed it.
             if not handled:
                 handled = True
                 await self._reject(send)
@@ -255,22 +261,24 @@ class BodySizeLimitMiddleware:
         receive: Callable[[], Awaitable[MutableMapping[str, Any]]],
         send: Callable[[MutableMapping[str, Any]], Awaitable[None]],
     ) -> None:
-        """Gövdesiz metodlarda gövdeyi middleware tüketip sayar, sonra uygulamayı çağırır.
+        """For bodyless methods the middleware consumes and counts the body itself,
+        then calls the application.
 
-        NEDEN AYRI YOL: normal akışta sayaç `counting_receive` üzerinden çalışır
-        ve yalnızca uygulama gövdeyi okursa ilerler. GET endpoint'leri gövdeyi
-        okumadığı için o kol hiç devreye girmiyordu (bkz. `BODYLESS_METHODS`).
-        Burada okuma sorumluluğunu uygulamadan alıyoruz: sınır, endpoint'in
-        gövdeyle ilgilenip ilgilenmemesinden BAĞIMSIZ hâle geliyor.
+        WHY A SEPARATE PATH: in the normal flow the counter runs through
+        `counting_receive` and only advances if the application reads the body.
+        Because GET endpoints never read it, that arm never engaged at all (see
+        `BODYLESS_METHODS`). Here we take the reading responsibility away from the
+        application, which makes the limit INDEPENDENT of whether an endpoint
+        cares about the body.
 
-        Sınır aşılırsa okuma o anda durur — korumaya çalıştığımız belleği önce
-        harcamayız.
+        If the limit is exceeded, reading stops right there — we never spend the
+        memory we are trying to protect.
         """
         received = 0
         while True:
             message = await receive()
             if message["type"] != "http.request":
-                # http.disconnect: istemci gitti, sayacak gövde kalmadı.
+                # http.disconnect: the client is gone, there is no body left to count.
                 break
             received += len(message.get("body", b""))
             if received > self.max_body_bytes:
@@ -280,7 +288,7 @@ class BodySizeLimitMiddleware:
                 break
 
         async def drained_receive() -> MutableMapping[str, Any]:
-            """Gövde tüketildi; uygulama yine de okumak isterse boş görür."""
+            """The body was consumed; if the application still reads, it sees empty."""
             return {"type": "http.request", "body": b"", "more_body": False}
 
         await self.app(scope, drained_receive, send)
@@ -292,8 +300,8 @@ class BodySizeLimitMiddleware:
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             content={
                 "detail": (
-                    f"İstek gövdesi çok büyük. Üst sınır {self.max_body_bytes} bayt; "
-                    "tek bir talep JSON'u normalde 2 KB'nin altındadır."
+                    f"Request body is too large. The limit is {self.max_body_bytes} bytes; "
+                    "a single claim JSON is normally under 2 KB."
                 )
             },
         )
@@ -301,30 +309,31 @@ class BodySizeLimitMiddleware:
 
 
 async def _unused_receive() -> MutableMapping[str, Any]:  # pragma: no cover
-    """`Response.__call__` imzası gereği; gövde okunmayacağı için çağrılmaz."""
+    """Required by the `Response.__call__` signature; never called since no body is read."""
     return {"type": "http.disconnect"}
 
 
 # --------------------------------------------------------------------------- #
-# Doğrulama hatası gövdesi
+# Validation error body
 # --------------------------------------------------------------------------- #
 
 
 async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """422 gövdesinden istemcinin gönderdiği ham veriyi ayıklar.
+    """Strips the client's raw data out of the 422 body.
 
-    KORUNAN: `loc` (hangi alan), `msg` (ne yanlış), `type` (makine-okunur kod).
-    Frontend alan bazlı hata gösterebilmek için bu üçüne ihtiyaç duyar; durum
-    kodu ve `detail` listesi yapısı da aynen korunur.
+    KEPT: `loc` (which field), `msg` (what is wrong), `type` (machine-readable
+    code). The frontend needs all three to show per-field errors; the status code
+    and the structure of the `detail` list are preserved as well.
 
-    DÜŞÜRÜLEN: `input` (istemcinin gönderdiği ham değerin ta kendisi) ve `ctx`
-    (bazı hata tiplerinde girdi türevleri taşır). Bu API'ye gönderilen gövde
-    sigorta talebi verisidir; hatalı bir istekte onu geri yansıtmak veriyi
-    log'lara ve tarayıcı konsoluna taşır.
+    DROPPED: `input` (the client's raw submitted value itself) and `ctx` (which
+    carries input-derived data for some error types). The body sent to this API
+    is insurance claim data; echoing it back on a bad request would carry that
+    data into logs and the browser console.
 
-    NOT: `loc` içindeki alan adı istemciden gelebilir (bilinmeyen alan
-    hatasında). Bu bilinçli: DEĞER değil yalnızca ANAHTAR adı geri döner ve
-    hangi alanın reddedildiğini söylemek hatanın anlaşılması için şarttır.
+    NOTE: the field name inside `loc` can originate from the client (on an
+    unknown-field error). That is deliberate: only the KEY name comes back, never
+    the VALUE, and naming the rejected field is essential for the error to be
+    understandable.
     """
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
     sanitized = [
@@ -342,43 +351,45 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
 
 
 # --------------------------------------------------------------------------- #
-# Uygulama yaşam döngüsü
+# Application lifecycle
 # --------------------------------------------------------------------------- #
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Artefaktı açılışta bir kez yükler; başarısız olursa uygulama açılmaz."""
+    """Loads the artifact once at startup; if it fails, the application does not start."""
     app.state.bundle = ModelBundle.load()
     yield
-    # Kapanışta serbest bırakılacak dış kaynak yok (dosya/soket tutulmuyor);
-    # bundle'ı GC'ye bırakmak yeterli.
+    # Nothing external to release on shutdown (no files or sockets are held);
+    # letting the bundle be garbage collected is enough.
 
 
 def get_bundle(request: Request) -> ModelBundle:
-    """Yüklenmiş artefaktı endpoint'lere veren bağımlılık."""
+    """Dependency that hands the loaded artifact to the endpoints."""
     return request.app.state.bundle
 
 
 BundleDep = Annotated[ModelBundle, Depends(get_bundle)]
 
-# Rotalar modül düzeyinde bir router'da toplanır; fabrika bunu `include_router`
-# ile bağlar. Böylece hem dekoratör okunabilirliği hem fabrika esnekliği korunur.
+# Routes are collected on a module-level router that the factory attaches with
+# `include_router`. That keeps both decorator readability and factory
+# flexibility.
 router = APIRouter()
 
 
 # --------------------------------------------------------------------------- #
-# Endpoint'ler
+# Endpoints
 # --------------------------------------------------------------------------- #
 
 
 @router.get("/health", response_model=HealthResponse, tags=["ops"])
 def health(bundle: BundleDep) -> HealthResponse:
-    """Basit healthcheck.
+    """Simple healthcheck.
 
-    `bundle` bağımlılığı bilinçli: uygulama zaten artefakt olmadan açılmadığı
-    için buraya gelmek "model yüklü" demektir. `model_version` deploy sonrası
-    "hangi artefakt koşuyor?" sorusunu tek istekle cevaplar.
+    The `bundle` dependency is deliberate: since the application refuses to start
+    without the artifact, reaching this point means "the model is loaded".
+    `model_version` answers "which artifact is running?" in a single request
+    after a deploy.
     """
     return HealthResponse(
         status="ok",
@@ -389,32 +400,31 @@ def health(bundle: BundleDep) -> HealthResponse:
 
 @router.post("/predict", response_model=PredictResponse, tags=["inference"])
 def predict(payload: PredictRequest, bundle: BundleDep) -> PredictResponse:
-    """Tek bir talebi skorlar ve SHAP katkılarıyla açıklar.
+    """Scores a single claim and explains it with SHAP contributions.
 
-    `by_alias=True`: `capital-gains` / `capital-loss` alanları pipeline'ın
-    kolon adlarıyla (tireli) çıksın diye. `model.py` anahtarların metadata
-    kolon adları olduğunu varsayar; alias'sız dump o varsayımı bozardı.
+    `by_alias=True`: so the `capital-gains` / `capital-loss` fields come out with
+    the pipeline's (hyphenated) column names. `model.py` assumes the keys are
+    metadata column names; dumping without aliases would break that assumption.
     """
     result = bundle.predict(payload.model_dump(by_alias=True))
     return PredictResponse.model_validate(result)
 
 
-# AŞAĞIDAKİ AÇIKLAMA BİLİNÇLİ OLARAK DOCSTRING DEĞİL, YORUM:
-# Bir endpoint'in docstring'i OpenAPI şemasına `description` olarak girer ve
-# `/openapi.json` public bir yüzeydir. Beyaz listenin DIŞINDA bıraktığımız
-# metadata anahtarlarının adlarını docstring'de saymak, tam da gizlemeye
-# çalıştığımız iç yapıyı public şemaya taşırdı. Açıklama burada duruyor:
-# kaynağı okuyan için değeri aynı, OpenAPI için görünmez.
+# THE NOTE BELOW IS DELIBERATELY A COMMENT, NOT A DOCSTRING:
+# An endpoint's docstring becomes the `description` in the OpenAPI schema, and
+# `/openapi.json` is a public surface. Listing the names of the metadata keys we
+# left OUT of the allowlist would carry the very internal structure we are trying
+# to withhold into that public schema. The explanation stays here: just as useful
+# to someone reading the source, invisible to OpenAPI.
 #
-#   metadata.json OLDUĞU GİBİ DÖNDÜRÜLMEZ. `schemas.py`'daki alt modeller
-#   yalnızca izin verilen alanları ilan eder; `extra="ignore"` sayesinde geri
-#   kalan her şey (ön işleme sözleşmesi, hiperparametreler, kaynak dosya adı)
-#   düşer. Elle `dict.pop()` yapmıyoruz: kırpma listesi kodun bir yerinde
-#   unutulur, şema ise unutulamaz — ayrıca `response_model` ikinci bir süzgeç
-#   kurar.
+#   metadata.json IS NOT RETURNED AS-IS. The sub-models in `schemas.py` declare
+#   only the permitted fields; thanks to `extra="ignore"` everything else (the
+#   preprocessing contract, hyperparameters, the source file name) is dropped. We
+#   do not hand-write `dict.pop()` calls: a removal list gets forgotten somewhere
+#   in the code, a schema cannot be — and `response_model` adds a second filter.
 @router.get("/model-info", response_model=ModelInfoResponse, tags=["model card"])
 def model_info(bundle: BundleDep) -> ModelInfoResponse:
-    """Model card verisi — yayınlanmasına izin verilen alanların projeksiyonu."""
+    """Model card data — a projection of the fields cleared for publication."""
     metadata = bundle.metadata
     return ModelInfoResponse(
         model_name=metadata["model_name"],
@@ -429,8 +439,8 @@ def model_info(bundle: BundleDep) -> ModelInfoResponse:
         defaults=metadata["defaults"],
         fairness=metadata["fairness"],
         library_versions=metadata["library_versions"],
-        # Eşikler `model.py`'daki sabitlerden okunur: frontend kendi kopyasını
-        # tutmasın, tek doğruluk kaynağı olsun.
+        # The thresholds are read from the constants in `model.py` so the
+        # frontend keeps no copy of its own and there is a single source of truth.
         risk_thresholds=RiskThresholdsInfo(
             low_below=RISK_THRESHOLD_MEDIUM,
             high_at_or_above=RISK_THRESHOLD_HIGH,
@@ -445,41 +455,43 @@ def model_info(bundle: BundleDep) -> ModelInfoResponse:
 
 
 # --------------------------------------------------------------------------- #
-# Uygulama fabrikası
+# Application factory
 # --------------------------------------------------------------------------- #
 
 
 def create_app() -> FastAPI:
-    """Uygulamayı kurar. CORS origin'leri BU ÇAĞRIDA okunur, import anında değil.
+    """Builds the application. CORS origins are read IN THIS CALL, not at import time.
 
-    Testler bu fabrikayı farklı `ALLOWED_ORIGINS` değerleriyle çağırıp gerçek
-    HTTP isteğiyle davranışı doğrulayabilir; kablolama artık gözlemlenebilir.
+    Tests can call this factory with different `ALLOWED_ORIGINS` values and verify
+    the behaviour with a real HTTP request; the wiring is now observable.
     """
     application = FastAPI(
         title="Insurance Fraud Detection API",
         version="1.0.0",
-        summary="LightGBM tabanlı sigorta talebi dolandırıcılık skorlaması (SHAP açıklamalı).",
+        summary="LightGBM insurance claim fraud scoring, explained with SHAP.",
         description=(
-            "Tek bir sigorta talebini skorlar ve kararı SHAP katkılarıyla açıklar.\n\n"
-            "**Uyarı:** olasılıklar kalibre değildir ve model korunan nitelikleri "
-            "feature olarak kullanır. Ayrıntı için `GET /model-info`."
+            "Scores a single insurance claim and explains the decision with SHAP "
+            "contributions.\n\n"
+            "**Warning:** the probabilities are not calibrated, and the model uses "
+            "protected attributes as features. See `GET /model-info` for details."
         ),
         lifespan=lifespan,
     )
 
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
 
-    # MIDDLEWARE SIRASI ÖNEMLİ: `add_middleware` her çağrıda listenin BAŞINA
-    # ekler, yani SON eklenen en dışta kalır. CORS'u en dışta istiyoruz ki 413
-    # dâhil TÜM yanıtlar CORS başlıklarını alsın — aksi hâlde tarayıcı istemcisi
-    # hatayı okuyamaz, yalnızca opak bir ağ hatası görür.
+    # MIDDLEWARE ORDER MATTERS: `add_middleware` prepends to the list on every
+    # call, so the LAST one added ends up outermost. We want CORS outermost so
+    # that ALL responses — including the 413 — carry CORS headers; otherwise a
+    # browser client cannot read the error and only sees an opaque network
+    # failure.
     application.add_middleware(BodySizeLimitMiddleware, max_body_bytes=MAX_REQUEST_BODY_BYTES)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=get_allowed_origins(),
-        # Sadece gerçekten kullanılan metod/başlıklar. API kimlik doğrulaması
-        # yapmadığı için `allow_credentials` açılmaz (açmak, wildcard yasağıyla
-        # birlikte anlamsız bir risk olurdu).
+        # Only the methods and headers actually in use. Since the API performs no
+        # authentication, `allow_credentials` stays off (turning it on would be a
+        # pointless risk alongside the wildcard ban).
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type"],
         allow_credentials=False,
@@ -489,5 +501,5 @@ def create_app() -> FastAPI:
     return application
 
 
-# uvicorn hedefi: `app.main:app`
+# uvicorn target: `app.main:app`
 app = create_app()

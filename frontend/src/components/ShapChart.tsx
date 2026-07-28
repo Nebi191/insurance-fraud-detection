@@ -1,28 +1,29 @@
 /**
- * SHAP katkı grafiği — yatay bar, sıfırdan sapma.
+ * SHAP contribution chart — horizontal bars, deviation from zero.
  *
- * NEDEN PNG DEĞİL
- * ---------------
- * Backend SHAP'ı matplotlib görseli olarak değil ham JSON olarak veriyor
- * (`{feature, value, base_value}`). Grafik burada, tarayıcıda çiziliyor: veri
- * etkileşimli (tooltip, sıralama, filtre), tema değişince yeniden renklenir ve
- * sunucu bir çizim yığını taşımak zorunda kalmaz.
- *
- * NE GÖSTERİYOR
+ * WHY NOT A PNG
  * -------------
- * Her çubuk bir feature'ın LOG-ODDS katkısı. Sağa uzayan risk skorunu artırmış,
- * sola uzayan azaltmıştır. Toplamları modelin ham skorunu verir:
+ * The backend serves SHAP as raw JSON (`{feature, value, base_value}`), not as a
+ * matplotlib image. The chart is drawn here, in the browser: the data stays
+ * interactive (tooltips, sorting, filtering), it re-colours itself when the theme
+ * changes, and the server never has to carry a plotting stack.
  *
- *     sum(value) + base_value = ham skor,  sigmoid(ham skor) = fraud_probability
+ * WHAT IT SHOWS
+ * -------------
+ * Each bar is one feature's LOG-ODDS contribution. Bars extending right pushed
+ * the risk score up, bars extending left pulled it down. They sum to the model's
+ * raw margin:
  *
- * Bu toplanabilirlik backend'de açılışta doğrulanıyor; grafik de aynı
- * özdeşliği altta yazıyor ki sayı havadan gelmiş gibi durmasın.
+ *     sum(value) + base_value = raw margin,  sigmoid(raw margin) = fraud_probability
  *
- * SIFIR KATKILILAR AYRI
- * ---------------------
- * `split_count = 0` olan 16 feature'ın katkısı tam 0,0'dır. Bunları ana grafikte
- * göstermek 16 boş satır demek olurdu; ayrı ve katlanmış bir listede duruyorlar
- * çünkü "model buna bakmadı" bilgisi de bir bilgidir.
+ * The backend verifies that additivity at startup; the chart restates the same
+ * identity underneath so the number does not look like it came out of nowhere.
+ *
+ * ZERO CONTRIBUTIONS ARE KEPT SEPARATE
+ * ------------------------------------
+ * The 16 features with `split_count = 0` contribute exactly 0.00. Showing them in
+ * the main chart would mean 16 empty rows; they live in a separate collapsed list
+ * instead, because "the model did not look at this" is information too.
  */
 
 import { useMemo, useState } from "react";
@@ -68,8 +69,9 @@ export function ShapChart({ values }: { values: ShapValue[] }) {
   }, [values]);
 
   const visible = showAll ? contributing : contributing.slice(0, DEFAULT_VISIBLE);
-  // Recharts yukarıdan aşağı çizer; en güçlü katkı en üstte olsun diye ters
-  // çevirmiyoruz — backend zaten abs(value) azalan sırada gönderiyor.
+  // Recharts draws top to bottom; we do not reverse the rows because the backend
+  // already sends them sorted by descending abs(value), so the strongest
+  // contribution ends up on top.
   const chartHeight = Math.max(200, visible.length * 34 + 40);
   const total = contributing.reduce((sum, row) => sum + row.value, 0);
 
@@ -77,24 +79,24 @@ export function ShapChart({ values }: { values: ShapValue[] }) {
     <section className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
       <div className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-          Bu skoru ne oluşturdu?
+          What produced this score?
         </h2>
         <span className="text-xs text-slate-500 dark:text-slate-400">
-          {contributing.length} alanın katkısı var, {zero.length} alanın katkısı sıfır
+          {contributing.length} contributing, {zero.length} with zero contribution
         </span>
       </div>
 
       <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
-        Çubuklar <strong>log-odds</strong> katkısını gösterir:{" "}
-        <span className="font-medium text-[var(--color-shap-positive)]">sağa</span> uzayan
-        riski artırmış,{" "}
-        <span className="font-medium text-[var(--color-shap-negative)]">sola</span> uzayan
-        azaltmıştır.
+        Bars show the <strong>log-odds</strong> contribution:{" "}
+        <span className="font-medium text-[var(--color-shap-positive)]">right</span> pushed
+        the risk up,{" "}
+        <span className="font-medium text-[var(--color-shap-negative)]">left</span> pulled
+        it down.
       </p>
 
       {visible.length === 0 ? (
         <p className="py-8 text-center text-sm text-slate-500 dark:text-slate-400">
-          Hiçbir feature katkı üretmedi.
+          No feature produced a contribution.
         </p>
       ) : (
         <div style={{ height: chartHeight }}>
@@ -141,22 +143,22 @@ export function ShapChart({ values }: { values: ShapValue[] }) {
           className="mt-2 text-xs font-medium text-sky-700 underline underline-offset-2 hover:text-sky-900 dark:text-sky-400 dark:hover:text-sky-300"
         >
           {showAll
-            ? `İlk ${DEFAULT_VISIBLE} tanesini göster`
-            : `Katkısı olan ${contributing.length} alanın hepsini göster`}
+            ? `Show the top ${DEFAULT_VISIBLE} only`
+            : `Show all ${contributing.length} contributing fields`}
         </button>
       )}
 
       <dl className="mt-4 grid gap-2 border-t border-slate-200 pt-3 text-xs text-slate-600 sm:grid-cols-3 dark:border-slate-800 dark:text-slate-400">
         <div>
-          <dt className="font-medium text-slate-500 dark:text-slate-400">Taban (base value)</dt>
+          <dt className="font-medium text-slate-500 dark:text-slate-400">Base value</dt>
           <dd className="tabular-nums">{formatContribution(baseValue)}</dd>
         </div>
         <div>
-          <dt className="font-medium text-slate-500 dark:text-slate-400">Katkı toplamı</dt>
+          <dt className="font-medium text-slate-500 dark:text-slate-400">Sum of contributions</dt>
           <dd className="tabular-nums">{formatContribution(total)}</dd>
         </div>
         <div>
-          <dt className="font-medium text-slate-500 dark:text-slate-400">Ham skor</dt>
+          <dt className="font-medium text-slate-500 dark:text-slate-400">Raw margin</dt>
           <dd className="tabular-nums">
             {formatContribution(baseValue + total)} → sigmoid →{" "}
             {(1 / (1 + Math.exp(-(baseValue + total))) * 100).toFixed(1)}%
@@ -172,13 +174,13 @@ export function ShapChart({ values }: { values: ShapValue[] }) {
             aria-expanded={zeroOpen}
             className="text-xs font-medium text-slate-600 underline underline-offset-2 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
           >
-            Katkısı tam sıfır olan {zero.length} alan {zeroOpen ? "gizle" : "göster"}
+            {zeroOpen ? "Hide" : "Show"} the {zero.length} fields contributing exactly zero
           </button>
           {zeroOpen && (
             <>
               <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                Bu alanlarda eğitilmiş ağaçlar hiç dallanmıyor; değerleri ne olursa
-                olsun skoru etkilemezler.
+                The trained trees never branch on these columns; whatever their
+                values, they cannot affect the score.
               </p>
               <ul className="mt-2 flex flex-wrap gap-1.5">
                 {zero.map((row) => (
@@ -215,14 +217,14 @@ function ContributionTooltip({
         {formatContribution(row.value)} log-odds
       </p>
       <p className="mt-0.5 text-slate-500 dark:text-slate-400">
-        {row.value >= 0 ? "Riski artırdı" : "Riski azalttı"}
+        {row.value >= 0 ? "Pushed the risk up" : "Pulled the risk down"}
       </p>
     </div>
   );
 }
 
 function formatContribution(value: number): string {
-  const formatted = new Intl.NumberFormat("tr-TR", {
+  const formatted = new Intl.NumberFormat("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);

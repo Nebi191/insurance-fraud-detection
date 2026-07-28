@@ -1,26 +1,25 @@
 /**
- * Backend istemcisi.
+ * Backend client.
  *
- * NE YAPAR, NEDEN BÖYLE YAPAR
- * ---------------------------
+ * WHAT IT DOES, AND WHY IT DOES IT THIS WAY
+ * -----------------------------------------
  *
- * 1) TEK BİR HATA TÜRÜ
- *    Çağıran taraf üç ayrı başarısızlığı ayırt edebilmeli: ağ hatası,
- *    doğrulama hatası (422, alan bazlı), ve diğer sunucu hataları. `ApiError`
- *    bu üçünü tek tipte taşır ki UI `catch` içinde tahmin yürütmek zorunda
- *    kalmasın.
+ * 1) ONE ERROR TYPE
+ *    Callers need to distinguish three failures: a network error, a validation
+ *    error (422, per field), and any other server error. `ApiError` carries all
+ *    three in a single type so the UI never has to guess inside a `catch`.
  *
- * 2) 422 GÖVDESİ ALAN BAZLI HATAYA ÇEVRİLİR
- *    Backend `loc: ["body", "witnesses"]` biçiminde dönüyor. Formun ihtiyacı
- *    olan şey `{ witnesses: "mesaj" }`; dönüşümü burada bir kez yapıyoruz ki
- *    her bileşen kendi ayrıştırmasını yazmasın.
+ * 2) THE 422 BODY IS TURNED INTO PER-FIELD ERRORS
+ *    The backend returns `loc: ["body", "witnesses"]`. What the form needs is
+ *    `{ witnesses: "message" }`; the conversion happens here once so that no
+ *    component has to write its own parsing.
  *
- * 3) YANIT ŞEKLİ ÇALIŞMA ZAMANINDA KONTROL EDİLİR
- *    TypeScript tipi bir İDDİADIR, garanti değil: `await response.json()`
- *    `any` döner ve yanlış şekildeki bir gövde uygulamanın derinlerinde
- *    anlamsız bir hatayla patlar. Sözleşmenin tutmadığı yerde ANINDA ve
- *    anlaşılır biçimde durmak, Faz 7'de backend/frontend sürümleri ayrışırsa
- *    teşhisi dakikalar yerine saniyeler alır.
+ * 3) RESPONSE SHAPES ARE CHECKED AT RUNTIME
+ *    A TypeScript type is an ASSERTION, not a guarantee: `await response.json()`
+ *    returns `any`, and a wrongly-shaped body blows up deep inside the app with
+ *    a meaningless error. Stopping IMMEDIATELY and legibly at the point the
+ *    contract breaks turns a Phase 7 backend/frontend version skew from a
+ *    minutes-long diagnosis into a seconds-long one.
  */
 
 import type {
@@ -31,8 +30,8 @@ import type {
 } from "./types";
 
 /**
- * Faz 7'de Netlify'da `VITE_API_URL` olarak HF Spaces URL'i verilecek.
- * Yerelde varsayılan uvicorn adresi kullanılır.
+ * In Phase 7 Netlify supplies the Hugging Face Spaces URL via `VITE_API_URL`.
+ * Locally we fall back to the default uvicorn address.
  */
 export const API_BASE_URL = (
   import.meta.env["VITE_API_URL"] ?? "http://127.0.0.1:8000"
@@ -43,7 +42,7 @@ export type ApiErrorKind = "network" | "validation" | "server";
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly status: number | null;
-  /** Yalnızca `kind === "validation"` iken dolu: { alanAdı: mesaj }. */
+  /** Populated only when `kind === "validation"`: { fieldName: message }. */
   readonly fieldErrors: Record<string, string>;
 
   constructor(
@@ -65,13 +64,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * 422 gövdesini `{ alanAdı: mesaj }` haritasına çevirir.
+ * Converts a 422 body into a `{ fieldName: message }` map.
  *
- * Gövde `unknown` olarak geziliyor, `ValidationErrorBody`'ye CAST EDİLMİYOR:
- * cast bir iddiadır, gelen gövde başka şekilde olsaydı hata form katmanının
- * derinlerinde anlamsız bir yerde patlardı. Burada her adım kontrol ediliyor
- * ve tanınmayan gövde sessizce boş haritaya düşüyor — kullanıcı yine genel
- * hata mesajını görür.
+ * The body is walked as `unknown` and NEVER cast to `ValidationErrorBody`: a
+ * cast is an assertion, and a differently-shaped body would then explode
+ * somewhere meaningless inside the form layer. Every step is checked here, and
+ * an unrecognised body degrades silently to an empty map — the user still sees
+ * the generic error message.
  */
 function toFieldErrors(body: unknown): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -86,7 +85,8 @@ function toFieldErrors(body: unknown): Record<string, string> {
     const message = item["msg"];
     if (!Array.isArray(location) || typeof message !== "string") continue;
 
-    // loc = ["body", "<alan>"] — ilk eleman gövdeyi işaret eder, sonuncuyu alıyoruz.
+    // loc = ["body", "<field>"] — the first element points at the body, so we
+    // take the last one.
     const field = location[location.length - 1];
     if (typeof field === "string" && field !== "body" && !(field in errors)) {
       errors[field] = message;
@@ -103,13 +103,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers: { "Content-Type": "application/json", ...init?.headers },
     });
   } catch (cause) {
-    // Buraya CORS reddi de düşer ve tarayıcı gerekçeyi JS'e VERMEZ — mesajın
-    // olası sebebi açıkça yazmasının nedeni bu.
+    // A CORS rejection also lands here, and the browser deliberately withholds
+    // the reason from JS — which is why the message spells out the likely cause.
     throw new ApiError(
       "network",
-      `API'ye ulaşılamadı (${API_BASE_URL}). Backend çalışıyor mu? ` +
-        "CORS reddi de bu hataya benzer görünür: backend'in ALLOWED_ORIGINS " +
-        "değişkeni bu sayfanın origin'ini içermeli.",
+      `Could not reach the API (${API_BASE_URL}). Is the backend running? ` +
+        "A CORS rejection looks the same from here: the backend's ALLOWED_ORIGINS " +
+        "must include this page's origin.",
       null,
       {},
     );
@@ -119,7 +119,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body: unknown = await response.json().catch(() => null);
     throw new ApiError(
       "validation",
-      "Girdi doğrulamadan geçmedi.",
+      "The input did not pass validation.",
       422,
       toFieldErrors(body),
     );
@@ -128,7 +128,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     throw new ApiError(
       "server",
-      `Sunucu ${response.status} döndü.`,
+      `The server returned ${response.status}.`,
       response.status,
     );
   }
@@ -136,13 +136,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-/** Yanıtın beklenen şekilde olduğunu çalışma zamanında doğrular. */
+/** Verifies at runtime that a response really has the expected shape. */
 function assertShape(condition: boolean, what: string): void {
   if (!condition) {
     throw new ApiError(
       "server",
-      `API yanıtı beklenen sözleşmeye uymuyor: ${what}. ` +
-        "Backend ve frontend sürümleri ayrışmış olabilir.",
+      `The API response does not match the expected contract: ${what}. ` +
+        "The backend and frontend versions may have drifted apart.",
     );
   }
 }
@@ -153,11 +153,11 @@ export async function predict(payload: PredictRequest): Promise<PredictResponse>
     body: JSON.stringify(payload),
   });
 
-  assertShape(typeof body.fraud_probability === "number", "fraud_probability sayı değil");
-  assertShape(Array.isArray(body.shap_values), "shap_values dizi değil");
+  assertShape(typeof body.fraud_probability === "number", "fraud_probability is not a number");
+  assertShape(Array.isArray(body.shap_values), "shap_values is not an array");
   assertShape(
     Array.isArray(body.out_of_distribution_warnings),
-    "out_of_distribution_warnings dizi değil",
+    "out_of_distribution_warnings is not an array",
   );
   return body;
 }
@@ -165,15 +165,15 @@ export async function predict(payload: PredictRequest): Promise<PredictResponse>
 export async function fetchModelInfo(): Promise<ModelInfoResponse> {
   const body = await request<ModelInfoResponse>("/model-info");
 
-  assertShape(isRecord(body.training_ranges), "training_ranges yok");
-  assertShape(isRecord(body.defaults), "defaults yok");
+  assertShape(isRecord(body.training_ranges), "training_ranges is missing");
+  assertShape(isRecord(body.defaults), "defaults is missing");
   assertShape(
     isRecord(body.feature_influence?.features),
-    "feature_influence.features yok",
+    "feature_influence.features is missing",
   );
   assertShape(
     Array.isArray(body.feature_list?.pipeline_input_order),
-    "feature_list.pipeline_input_order yok",
+    "feature_list.pipeline_input_order is missing",
   );
   return body;
 }

@@ -2,15 +2,16 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// Tailwind v4 kendi Vite eklentisiyle geliyor: postcss.config / tailwind.config
-// dosyalarına gerek yok, tema `src/index.css` içinde `@theme` ile tanımlanıyor.
+// Tailwind v4 ships its own Vite plugin: no postcss.config / tailwind.config
+// files are needed, and the theme is declared with `@theme` in `src/index.css`.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
-    // Backend'in CORS varsayılanı tam olarak bu origin (backend/app/main.py ->
-    // DEFAULT_ALLOWED_ORIGINS). Port değişirse backend'de ALLOWED_ORIGINS
-    // güncellenmeli, yoksa tarayıcı isteği opak bir ağ hatasıyla düşer.
+    // The backend's CORS default is exactly this origin (backend/app/main.py ->
+    // DEFAULT_ALLOWED_ORIGINS). If the port changes, ALLOWED_ORIGINS on the
+    // backend has to change too, or the browser drops the request with an
+    // opaque network error.
     strictPort: true,
   },
 });

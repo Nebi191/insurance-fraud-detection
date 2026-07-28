@@ -5,25 +5,25 @@ import { ClaimForm, buildPayload, type FormValues } from "../components/ClaimFor
 import type { ModelInfoResponse, PredictResponse } from "../types";
 
 /**
- * Sonuç kartı TEMBEL yükleniyor çünkü içindeki `ShapChart` recharts'a bağlı ve
- * recharts tek başına paketin yarısından fazlası. Kullanıcı "Skorla"ya basana
- * kadar grafik kütüphanesini indirmesinin bir anlamı yok: ilk açılış belirgin
- * biçimde hızlanıyor, sonuç gelirken küçük bir gecikme oluşuyor (o sırada
- * zaten ağdan yanıt bekleniyor).
+ * The result card is LAZY-loaded because the `ShapChart` inside it depends on
+ * recharts, and recharts alone is more than half the bundle. There is no point
+ * downloading a charting library before the user presses "Score claim": the
+ * initial load gets noticeably faster, at the cost of a small delay once a result
+ * arrives (during which we are waiting on the network anyway).
  */
 const ResultCard = lazy(() =>
   import("../components/ResultCard").then((module) => ({ default: module.ResultCard })),
 );
 
 /**
- * Skorlama sayfası: solda form, sağda sonuç.
+ * Scoring page: form on the left, result on the right.
  *
- * SONUÇ ESKİMEZ, TEMİZLENİR
- * -------------------------
- * Kullanıcı formu değiştirdiğinde önceki sonucu ekranda BIRAKMIYORUZ ama
- * silmiyoruz da — "bayat" olarak işaretliyoruz. Sessizce durması, değiştirilen
- * girdiye ait sanılmasına yol açardı; tamamen kaldırmak ise karşılaştırma
- * imkânını yok ederdi.
+ * A RESULT IS MARKED STALE, NOT DISCARDED
+ * ---------------------------------------
+ * When the user edits the form we do NOT leave the previous result standing as
+ * if nothing happened — but we do not delete it either; we mark it "stale".
+ * Leaving it silently would invite reading it as belonging to the edited input;
+ * removing it entirely would destroy the ability to compare.
  */
 export function ScorePage({ info }: { info: ModelInfoResponse }) {
   const [values, setValues] = useState<FormValues>({});
@@ -41,8 +41,8 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
   const handleChange = useCallback((name: string, value: string) => {
     setValues((previous) => ({ ...previous, [name]: value }));
     setStale(true);
-    // Kullanıcı alana dokununca o alanın hatası kalkar; hâlâ geçersizse
-    // sunucu bir sonraki gönderimde tekrar söyler.
+    // Touching a field clears its error; if it is still invalid the server will
+    // say so again on the next submission.
     setFieldErrors((previous) => {
       if (!(name in previous)) return previous;
       const next = { ...previous };
@@ -64,12 +64,12 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
         setFieldErrors(error.fieldErrors);
         setFormError(
           Object.keys(error.fieldErrors).length > 0
-            ? "Bazı alanlar kabul edilmedi — ayrıntı alanların altında."
-            : "Girdi doğrulamadan geçmedi.",
+            ? "Some fields were rejected — details are shown under each one."
+            : "The input did not pass validation.",
         );
       } else {
         setFormError(
-          error instanceof ApiError ? error.message : "Beklenmeyen bir hata oluştu.",
+          error instanceof ApiError ? error.message : "An unexpected error occurred.",
         );
       }
     } finally {
@@ -115,8 +115,8 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
           <div className={stale ? "opacity-60 transition-opacity" : "transition-opacity"}>
             {stale && (
               <p className="mb-2 rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                Form değişti — aşağıdaki sonuç önceki girdilere ait. Yeniden
-                skorlayın.
+                The form changed — the result below belongs to the previous input.
+                Score it again.
               </p>
             )}
             <Suspense
@@ -140,12 +140,12 @@ function EmptyState() {
   return (
     <section className="rounded-xl border border-dashed border-slate-300 bg-white/50 p-8 text-center dark:border-slate-700 dark:bg-slate-900/50">
       <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
-        Sonuç burada görünecek
+        The result will appear here
       </p>
       <p className="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-        Formu doldurup <strong>Skorla</strong>'ya basın. Hiçbir alanı doldurmadan
-        da deneyebilirsiniz — model eksik alanları eğitim verisinin medyan/mod
-        değerleriyle tamamlar.
+        Fill in the form and press <strong>Score claim</strong>. You can also try it
+        without entering anything — the model completes missing fields with the
+        median/mode of the training data.
       </p>
     </section>
   );

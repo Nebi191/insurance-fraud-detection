@@ -1,18 +1,18 @@
-"""Faz 1 API testleri.
+"""Phase 1 API tests.
 
-TEST FELSEFESİ
---------------
-Bu dosya "endpoint 200 döndü mü" testinden fazlasını yapmaya çalışır. Her test
-somut bir SESSİZ HATA sınıfını kapatır:
+TEST PHILOSOPHY
+---------------
+This file tries to do more than ask "did the endpoint return 200". Each test
+closes a concrete class of SILENT failure:
 
-  * Şema ile artefakt birbirinden ayrışabilir  -> Literal/metadata senkron testi
-  * `"?"` NaN'a çevrilmezse encoder onu -1'e kodlar ve imputer devreye girmez;
-    olasılık DEĞİŞMEYEBİLİR, yani uçtan uca test bunu yakalayamaz
-                                               -> encoder seviyesinde test
-  * SHAP'te yanlış sınıf ekseni seçilirse tüm işaretler ters döner ama yanıt
-    yine "geçerli" görünür                     -> toplanabilirlik testi
-  * Yanıt şeması genişlerse PII/hiperparametre sızabilir
-                                               -> beyaz liste + PII testleri
+  * The schema and the artifact can drift apart -> Literal/metadata sync test
+  * If `"?"` is not converted to NaN, the encoder encodes it to -1 and the
+    imputer never runs; the probability MAY NOT CHANGE, so an end-to-end test
+    cannot catch it                              -> a test at the encoder level
+  * If the wrong SHAP class axis is chosen, every sign flips while the response
+    still looks "valid"                          -> the additivity test
+  * If the response schema widens, PII/hyperparameters can leak
+                                                 -> allowlist + PII tests
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import copy
 import json
 import logging
 import math
-import unicodedata
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, get_args
 
@@ -53,53 +53,39 @@ from app.model import (
 )
 from app.schemas import PREDICT_REQUEST_EXAMPLE, PredictRequest
 
-# `train_pipeline.py` bu kolonları modele hiç sokmaz. İsimleri burada tek
-# yerde tutuyoruz ki sızıntı testleri tek noktadan güncellensin.
+# `train_pipeline.py` never lets these columns near the model. Their names are
+# kept in one place so the leakage tests are updated from a single point.
 PII_COLUMNS = ("policy_number", "insured_zip", "incident_location")
 
-# `/model-info` yanıtında ASLA görünmemesi gereken metadata anahtarları.
+# Metadata keys that must NEVER appear in the `/model-info` response.
 FORBIDDEN_MODEL_INFO_KEYS = ("preprocessing_contract", "model_params", "source_file")
 
 
-def _fold(text: str) -> str:
-    """Türkçe metni aksan/nokta farklarından bağımsız aranabilir hâle getirir.
-
-    NEDEN GEREKLİ: `"DENETİMİ".lower()` Python'da `"deneti̇mi̇"` üretir — Türkçe
-    noktalı `İ`, `i` + U+0307 (birleşen nokta) olarak çözülür. Bu yüzden düz bir
-    `"denetim" in text.lower()` kontrolü metin doğru olmasına rağmen başarısız
-    olur. NFKD ayrıştırması + birleşen işaretlerin atılması bu tuzağı kapatır ve
-    testi ç/ş/ı gibi harflere de dayanıklı kılar.
-    """
-    decomposed = unicodedata.normalize("NFKD", text.lower())
-    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
-    return stripped.translate(str.maketrans("çğıöşü", "cgiosu"))
-
-
 # --------------------------------------------------------------------------- #
-# 1) Artefakt yükleme
+# 1) Artifact loading
 # --------------------------------------------------------------------------- #
 
 
 def test_artifacts_actually_load(bundle: ModelBundle) -> None:
-    """pipeline.pkl ve metadata.json gerçekten yüklendi ve tutarlı."""
+    """pipeline.pkl and metadata.json really loaded and agree with each other."""
     assert bundle.pipeline is not None
     assert bundle.explainer is not None
     assert len(bundle.input_order) == 34
     assert set(bundle.defaults) == set(bundle.input_order)
-    # `ModelBundle.load()` içindeki doğrulamalar (sözleşme, feature hizası,
-    # SHAP toplanabilirliği) patlamadıysa buraya gelinebilmiş demektir.
+    # If the verifications inside `ModelBundle.load()` (contract, feature
+    # alignment, SHAP additivity) did not raise, we could only have got this far.
 
 
 def test_pipeline_is_a_single_sklearn_pipeline(bundle: ModelBundle) -> None:
-    """Tek Pipeline kuralı: preprocessing modelin ayrılmaz parçası."""
+    """The single-Pipeline rule: preprocessing is an inseparable part of the model."""
     assert list(bundle.pipeline.named_steps) == ["preprocessor", "model"]
 
 
 def test_artifact_path_is_derived_from_the_package_not_from_input(bundle: ModelBundle) -> None:
-    """K1: artefakt yolu sabit ve paket konumundan türetilir.
+    """K1: the artifact path is fixed and derived from the package location.
 
-    Pickle yüklemek kod çalıştırmakla eşdeğerdir; yolun istekten/ortamdan
-    gelmesi keyfi kod çalıştırma demek olurdu.
+    Loading a pickle is equivalent to executing code; letting the path come from a
+    request or the environment would mean arbitrary code execution.
     """
     assert MODELS_DIR.name == "models"
     assert MODELS_DIR.parent.name == "backend"
@@ -108,23 +94,23 @@ def test_artifact_path_is_derived_from_the_package_not_from_input(bundle: ModelB
 
 
 def test_missing_artifact_fails_fast(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
-    """Artefakt yoksa `ModelBundle.load()` net bir hata fırlatır."""
-    monkeypatch.setattr(model_module, "PIPELINE_PATH", tmp_path / "yok.pkl")
-    with pytest.raises(model_module.ArtifactError, match="bulunamadı"):
+    """With no artifact, `ModelBundle.load()` raises a clear error."""
+    monkeypatch.setattr(model_module, "PIPELINE_PATH", tmp_path / "missing.pkl")
+    with pytest.raises(model_module.ArtifactError, match="not found"):
         ModelBundle.load()
 
 
 def test_app_refuses_to_start_without_artifact(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """K1 fail-fast: metadata yoksa uygulama HİÇ açılmaz.
+    """K1 fail-fast: with no metadata the application does NOT start at all.
 
-    "Ayakta ama her isteğe 500 dönen" bir servis, healthcheck'i yeşil
-    gösterdiği için açılmayan bir servisten daha tehlikelidir.
+    A service that is "up but returns 500 to every request" is more dangerous than
+    one that never starts, because it shows a green healthcheck.
     """
-    monkeypatch.setattr(model_module, "METADATA_PATH", tmp_path / "yok.json")
+    monkeypatch.setattr(model_module, "METADATA_PATH", tmp_path / "missing.json")
     with pytest.raises(model_module.ArtifactError), TestClient(app):
-        pass  # pragma: no cover - buraya gelinmemeli
+        pass  # pragma: no cover - unreachable
 
 
 # --------------------------------------------------------------------------- #
@@ -142,7 +128,7 @@ def test_health_returns_ok(client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 3) /model-info — beyaz liste ve sızıntı
+# 3) /model-info — allowlist and leakage
 # --------------------------------------------------------------------------- #
 
 
@@ -155,18 +141,18 @@ def test_model_info_returns_model_card_fields(client: TestClient, metadata: dict
     assert body["metrics"]["test_pr_auc"] == pytest.approx(metadata["metrics"]["test_pr_auc"])
     assert body["feature_list"]["pipeline_input_order"] == metadata["feature_list"]["pipeline_input_order"]
     assert body["trained_at"] == metadata["trained_at"]
-    # K6: eşikler ve kalibrasyon uyarısı yayınlanıyor.
+    # K6: the thresholds and the calibration warning are published.
     assert body["risk_thresholds"]["low_below"] == RISK_THRESHOLD_MEDIUM
     assert body["risk_thresholds"]["high_at_or_above"] == RISK_THRESHOLD_HIGH
     assert body["probability_calibration"]["calibrated"] is False
-    assert "kalibre" in body["probability_calibration"]["warning"].lower()
+    assert "not calibrated" in body["probability_calibration"]["warning"].lower()
 
 
 def test_model_info_does_not_leak_internal_keys(client: TestClient) -> None:
-    """preprocessing_contract / model_params / source_file yanıtta OLMAMALI.
+    """preprocessing_contract / model_params / source_file must NOT be in the response.
 
-    Sadece üst seviye anahtarlara değil, serileşmiş METNİN tamamına bakıyoruz:
-    iç içe bir yerde sızarsa da yakalansın.
+    We look not only at the top-level keys but at the ENTIRE serialised text, so a
+    leak nested somewhere deeper is caught too.
     """
     response = client.get("/model-info")
     body = response.json()
@@ -177,35 +163,36 @@ def test_model_info_does_not_leak_internal_keys(client: TestClient) -> None:
 
     raw = response.text
     for key in FORBIDDEN_MODEL_INFO_KEYS:
-        assert key not in raw, f"'{key}' /model-info yanıtına sızmış"
+        assert key not in raw, f"'{key}' leaked into the /model-info response"
 
-    # Hiperparametre değerleri de sızmamalı (model_params kaldırıldı ama
-    # değerlerin başka bir alandan dolaylı çıkmadığını da doğrulayalım).
+    # Hyperparameter values must not leak either (model_params was removed, but
+    # let us also verify the values do not surface indirectly through another field).
     assert "n_estimators" not in raw
     assert "learning_rate" not in raw
 
 
 def test_model_info_pii_appears_only_as_dropped_column_declaration(client: TestClient) -> None:
-    """PII kolon ADLARI yalnızca "bunları attık" beyanında geçebilir.
+    """PII column NAMES may appear only in the "we dropped these" declaration.
 
-    NOT — sözleşmede bir gerilim var ve bilinçli olarak böyle çözüldü:
-    K9 `feature_list.dropped_columns` alanını beyaz listeye alıyor, ama o liste
-    tanımı gereği `policy_number` / `insured_zip` / `incident_location`
-    adlarını İÇERİR. Bu bir sızıntı değildir — PII *değeri* değil, "bu kolonlar
-    modele hiç girmedi" beyanıdır ve model card için olumlu bir bilgidir.
-    Test bu yüzden şunu doğrular: bu adlar dropped_columns DIŞINDA hiçbir yerde
-    geçmiyor.
+    NOTE — there is a tension in the contract, resolved deliberately this way:
+    K9 puts `feature_list.dropped_columns` on the allowlist, but that list by
+    definition CONTAINS the names `policy_number` / `insured_zip` /
+    `incident_location`. That is not a leak — it is not a PII *value* but a
+    statement that "these columns never reached the model", and it is positive
+    information for a model card. So the test verifies this: those names appear
+    nowhere OUTSIDE dropped_columns.
     """
     body = client.get("/model-info").json()
 
     dropped = body["feature_list"].pop("dropped_columns")
-    assert set(PII_COLUMNS).issubset(set(dropped)), "PII kolonları drop listesinde olmalı"
+    assert set(PII_COLUMNS).issubset(set(dropped)), "the PII columns must be in the drop list"
 
     remainder = json.dumps(body, ensure_ascii=False)
     for column in PII_COLUMNS:
-        assert column not in remainder, f"'{column}' dropped_columns dışında da geçiyor"
+        assert column not in remainder, f"'{column}' also appears outside dropped_columns"
 
-    # PII kolonları modele hiç girmediği için varsayılan/aralık da üretemez.
+    # Because the PII columns never reached the model, they cannot produce a
+    # default or a range either.
     for column in PII_COLUMNS:
         assert column not in body["defaults"]
         assert column not in body["training_ranges"]
@@ -218,7 +205,7 @@ def test_model_info_pii_appears_only_as_dropped_column_declaration(client: TestC
 
 
 def test_predict_with_claude_md_example(client: TestClient) -> None:
-    """CLAUDE.md'deki örnek istek BİREBİR çalışıyor."""
+    """The example request from CLAUDE.md works EXACTLY as written."""
     response = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE)
     assert response.status_code == 200, response.text
 
@@ -229,7 +216,7 @@ def test_predict_with_claude_md_example(client: TestClient) -> None:
 
 
 def test_predict_response_has_exactly_the_contract_fields(client: TestClient) -> None:
-    """Sözleşmedeki 4 alan, fazlası yok (sızıntı yüzeyi dar kalsın)."""
+    """The 4 fields of the contract, no more (keep the leak surface narrow)."""
     body = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     assert set(body) == {
         "fraud_probability",
@@ -240,75 +227,75 @@ def test_predict_response_has_exactly_the_contract_fields(client: TestClient) ->
 
 
 def test_predict_with_empty_body_uses_defaults(client: TestClient) -> None:
-    """`{}` ile de çalışır: 34 alanın hepsi metadata.defaults'tan dolar."""
+    """It works with `{}` too: all 34 fields come from metadata.defaults."""
     response = client.post("/predict", json={})
     assert response.status_code == 200, response.text
     assert 0.0 <= response.json()["fraud_probability"] <= 1.0
 
 
 def test_predict_is_deterministic(client: TestClient) -> None:
-    """Aynı girdi -> aynı olasılık (bit bazında)."""
+    """Same input -> same probability (bit for bit)."""
     first = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     second = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     assert first == second
 
 
 def test_out_of_distribution_warnings_fire_end_to_end(client: TestClient) -> None:
-    """Faz 2 bitti kriteri: eğitim dışı değer `/predict` üzerinden uyarı üretir.
+    """Phase 2 completion criterion: an out-of-training value warns through `/predict`.
 
-    Faz 1'de bu test "her zaman boş" diyordu ve bilinçli olarak Faz 2'de
-    güncelleneceği yazılmıştı. Güncellenen hâli sözleşmenin iki ucunu da bağlar:
-    aralık İÇİNDEKİ istek uyarı üretmemeli, DIŞINDAKİ üretmeli.
+    In Phase 1 this test asserted "always empty" and it was deliberately noted
+    that it would be updated in Phase 2. The updated version pins down both ends
+    of the contract: a request INSIDE the range must not warn, one OUTSIDE must.
     """
-    # CLAUDE.md örneği tamamen eğitim aralığının içinde.
+    # The CLAUDE.md example is entirely inside the training range.
     body = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     assert body["out_of_distribution_warnings"] == []
 
-    # witnesses eğitimde 0-3, age 20-64. İkisi de fiziksel olarak mümkün,
-    # yani Pydantic kabul eder — ama model bunları hiç görmedi.
+    # witnesses is 0-3 in training, age is 20-64. Both are physically possible, so
+    # Pydantic accepts them — but the model has never seen them.
     body = client.post("/predict", json={"witnesses": 9, "age": 110}).json()
     assert set(body["out_of_distribution_warnings"]) == {"witnesses", "age"}
-    # Uyarı tahmini ENGELLEMEZ: skor yine döner.
+    # A warning does NOT block the prediction: the score still comes back.
     assert 0.0 <= body["fraud_probability"] <= 1.0
     assert body["risk_level"] in {"low", "medium", "high"}
 
 
 # --------------------------------------------------------------------------- #
-# 5) /predict — doğrulama reddi (422)
+# 5) /predict — validation rejections (422)
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
-        ({"incident_severity": "Katastrofik"}, "geçersiz Literal"),
-        ({"policy_state": "TX"}, "eğitimde olmayan kategori"),
-        ({"collision_type": "??"}, "'?' dışında bilinmeyen işaret"),
-        ({"witnesses": 999}, "sayısal üst sınır"),
-        ({"witnesses": -1}, "sayısal alt sınır"),
-        ({"age": 5}, "fiziksel alt sınır"),
-        ({"auto_year": 3000}, "fiziksel üst sınır"),
-        ({"capital-gains": -1}, "kazanç negatif olamaz"),
-        ({"capital-loss": 100}, "zarar bu veri setinde pozitif olamaz"),
-        ({"total_claim_amount": -5}, "tutar negatif olamaz"),
-        ({"number_of_vehicles_involved": 0}, "en az 1 araç"),
-        ({"incident_hour_of_the_day": 24}, "gün 0-23 saat"),
+        ({"incident_severity": "Catastrophic"}, "invalid Literal"),
+        ({"policy_state": "TX"}, "category not seen in training"),
+        ({"collision_type": "??"}, "unknown marker other than '?'"),
+        ({"witnesses": 999}, "numeric upper bound"),
+        ({"witnesses": -1}, "numeric lower bound"),
+        ({"age": 5}, "physical lower bound"),
+        ({"auto_year": 3000}, "physical upper bound"),
+        ({"capital-gains": -1}, "gains cannot be negative"),
+        ({"capital-loss": 100}, "a loss cannot be positive in this dataset"),
+        ({"total_claim_amount": -5}, "an amount cannot be negative"),
+        ({"number_of_vehicles_involved": 0}, "at least 1 vehicle"),
+        ({"incident_hour_of_the_day": 24}, "a day has hours 0-23"),
         ({"unknown_field": 1}, "extra='forbid'"),
-        ({"capital_gains": 1}, "alt tire yazım — alias 'capital-gains' olmalı"),
-        ({"incident_date": "2015-01-25"}, "ham tarih API yüzeyinde yok (K2)"),
-        ({"policy_bind_date": "1990-01-01"}, "ham tarih API yüzeyinde yok (K2)"),
-        ({"policy_number": 521585}, "PII alanı kabul edilmez"),
-        ({"insured_zip": 466132}, "PII alanı kabul edilmez"),
-        ({"witnesses": "iki"}, "tip hatası"),
+        ({"capital_gains": 1}, "underscore spelling — the alias must be 'capital-gains'"),
+        ({"incident_date": "2015-01-25"}, "raw dates are not on the API surface (K2)"),
+        ({"policy_bind_date": "1990-01-01"}, "raw dates are not on the API surface (K2)"),
+        ({"policy_number": 521585}, "a PII field is not accepted"),
+        ({"insured_zip": 466132}, "a PII field is not accepted"),
+        ({"witnesses": "two"}, "type error"),
     ],
 )
 def test_predict_rejects_invalid_input(client: TestClient, payload: dict, reason: str) -> None:
     response = client.post("/predict", json=payload)
-    assert response.status_code == 422, f"{reason} reddedilmeliydi: {response.text}"
+    assert response.status_code == 422, f"{reason} should have been rejected: {response.text}"
 
 
 def test_predict_accepts_question_mark(client: TestClient) -> None:
-    """'?' üç alanda geçerli bir değerdir ve 200 döner."""
+    """'?' is a valid value on three fields and returns a 200."""
     response = client.post(
         "/predict",
         json={"collision_type": "?", "property_damage": "?", "police_report_available": "?"},
@@ -318,21 +305,23 @@ def test_predict_accepts_question_mark(client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 6) preprocessing_contract adımları GERÇEKTEN uygulanıyor mu?
+# 6) Are the preprocessing_contract steps GENUINELY applied?
 # --------------------------------------------------------------------------- #
 
 
 def test_question_mark_becomes_nan_not_an_unknown_category(bundle: ModelBundle) -> None:
-    """`question_mark_to_nan` adımının ASIL testi.
+    """The REAL test of the `question_mark_to_nan` step.
 
-    NEDEN UÇTAN UCA DEĞİL DE ENCODER SEVİYESİNDE:
-    Bu modelde `collision_type` / `property_damage` / `police_report_available`
-    feature'larının split sayısı SIFIRDIR (LightGBM hiç kullanmıyor). Yani "?"
-    yanlışlıkla -1'e kodlansa bile `fraud_probability` DEĞİŞMEZ ve uçtan uca
-    bir test bu hatayı asla yakalayamaz. Sözleşme ihlali sessizdir.
+    WHY AT THE ENCODER LEVEL RATHER THAN END TO END:
+    In this model the `collision_type` / `property_damage` /
+    `police_report_available` features have a split count of ZERO (LightGBM never
+    uses them). So even if "?" were wrongly encoded to -1, `fraud_probability`
+    WOULD NOT CHANGE and an end-to-end test could never catch the bug. The
+    contract violation is silent.
 
-    O yüzden doğrudan pipeline'ın gördüğü kodlanmış değere bakıyoruz:
-    doğru davranışta imputer'ın mod değerinin kodu, yanlış davranışta -1.
+    So we look directly at the encoded value the pipeline sees: with correct
+    behaviour it is the code of the imputer's mode value, with incorrect behaviour
+    it is -1.
     """
     preprocessor = bundle.pipeline.named_steps["preprocessor"]
     cat_step = preprocessor.named_transformers_["cat"]
@@ -342,46 +331,46 @@ def test_question_mark_becomes_nan_not_an_unknown_category(bundle: ModelBundle) 
 
     for column in bundle.question_mark_columns:
         frame = bundle.prepare_row({column: "?"})
-        assert frame[column].isna().all(), f"'{column}' için '?' NaN'a çevrilmedi"
+        assert frame[column].isna().all(), f"'?' was not converted to NaN for '{column}'"
 
         index = cat_columns.index(column)
         expected_category = imputer.statistics_[index]
         expected_code = float(list(encoder.categories_[index]).index(expected_category))
 
         encoded = float(preprocessor.transform(frame)[f"cat__{column}"].iloc[0])
-        assert encoded != -1.0, f"'{column}': '?' bilinmeyen kategori olarak -1'e kodlandı"
-        assert encoded == expected_code, f"'{column}': imputer devreye girmedi"
+        assert encoded != -1.0, f"'{column}': '?' was encoded to -1 as an unknown category"
+        assert encoded == expected_code, f"'{column}': the imputer never ran"
 
 
 def test_missing_field_falls_back_to_metadata_default(bundle: ModelBundle) -> None:
-    """K3: verilmeyen alan `metadata.defaults` değeriyle dolar."""
+    """K3: a field that was not supplied is filled with the `metadata.defaults` value."""
     frame = bundle.prepare_row({})
     for column in bundle.input_order:
         assert frame[column].iloc[0] == bundle.defaults[column]
 
 
 def test_prepare_row_applies_order_columns_step(bundle: ModelBundle) -> None:
-    """`order_columns` adımı: kolon adları ve sırası sözleşmeyle birebir."""
-    # Anahtarlar kasten ters sırada verildi.
+    """The `order_columns` step: column names and order match the contract exactly."""
+    # The keys are supplied in reverse order on purpose.
     payload = {column: bundle.defaults[column] for column in reversed(bundle.input_order)}
     frame = bundle.prepare_row(payload)
     assert list(frame.columns) == bundle.input_order
 
 
 def test_explicit_null_is_treated_as_missing(client: TestClient) -> None:
-    """`null` göndermek alanı hiç göndermemekle aynı sonucu verir."""
+    """Sending `null` gives the same result as not sending the field at all."""
     explicit = client.post("/predict", json={"witnesses": None, "age": None}).json()
     omitted = client.post("/predict", json={}).json()
     assert explicit == omitted
 
 
 # --------------------------------------------------------------------------- #
-# 7) SHAP çıktısı (K7)
+# 7) SHAP output (K7)
 # --------------------------------------------------------------------------- #
 
 
 def test_shap_output_shape_and_naming(client: TestClient, bundle: ModelBundle) -> None:
-    """34 eleman, abs(value) azalan sıralı, ham önek yok, alanlar sözleşmeye uygun."""
+    """34 items, sorted by descending abs(value), no raw prefix, fields per the contract."""
     body = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     shap_values = body["shap_values"]
 
@@ -394,23 +383,23 @@ def test_shap_output_shape_and_naming(client: TestClient, bundle: ModelBundle) -
         assert not item["feature"].startswith("remainder__")
         assert math.isfinite(item["value"])
 
-    # Tüm feature'lar tam olarak bir kez dönüyor.
+    # Every feature is returned exactly once.
     assert sorted(item["feature"] for item in shap_values) == sorted(bundle.input_order)
 
     magnitudes = [abs(item["value"]) for item in shap_values]
-    assert magnitudes == sorted(magnitudes, reverse=True), "abs(value) azalan sırada değil"
+    assert magnitudes == sorted(magnitudes, reverse=True), "not sorted by descending abs(value)"
 
     base_values = {item["base_value"] for item in shap_values}
-    assert len(base_values) == 1, "base_value tüm elemanlarda aynı olmalı"
+    assert len(base_values) == 1, "base_value must be identical in every item"
 
 
 def test_shap_additivity_proves_correct_class_axis(client: TestClient) -> None:
-    """SHAP'in temel özdeşliği: sum(value) + base_value = ham skor (log-odds).
+    """SHAP's fundamental identity: sum(value) + base_value = raw margin (log-odds).
 
-    Bu testin asıl işi ŞEKİL VARSAYIMINI kanıtlamak: yanlış sınıf ekseni ya da
-    yanlış satır seçilseydi eşitlik bozulurdu. `shap 0.52 + lightgbm 4.6`
-    ikili modelde (1, 34) ndarray döndürüyor, ama sürüm değişip sınıf başına
-    liste dönmeye başlarsa bu test kırmızıya döner.
+    This test's real job is to prove the SHAPE ASSUMPTION: had the wrong class axis
+    or the wrong row been selected, the identity would break. `shap 0.52 +
+    lightgbm 4.6` returns a (1, 34) ndarray for a binary model, but if a version
+    change starts returning a list per class, this test goes red.
     """
     body = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
 
@@ -422,30 +411,29 @@ def test_shap_additivity_proves_correct_class_axis(client: TestClient) -> None:
 
 
 def test_shap_values_stay_aligned_with_the_booster_contributions(bundle: ModelBundle) -> None:
-    """SHAP katkıları LightGBM booster'ının `pred_contrib` çıktısıyla POZİSYON
-    bazında hizalı kalmalı.
+    """SHAP contributions must stay aligned BY POSITION with the LightGBM booster's
+    `pred_contrib` output.
 
-    NEDEN BU TEST VAR (reviewer MINOR-1'in cevabı):
-    Eski "yön testi" totolojikti — matematiksel olarak toplanabilirlikten
-    türüyordu ve asla kırmızıya dönemezdi. Daha da önemlisi, toplanabilirlik
-    feature adlarının doğru eşlendiğini KANITLAMAZ: SHAP değerlerini kendi
-    aralarında karıştırsanız bile toplam aynı kalır, yani additivity testi
-    geçmeye devam eder.
+    WHY THIS TEST EXISTS (the answer to reviewer MINOR-1):
+    The old "direction test" was tautological — it followed mathematically from
+    additivity and could never go red. More importantly, additivity DOES NOT PROVE
+    that feature names are mapped correctly: shuffle the SHAP values among
+    themselves and the sum stays the same, so the additivity test keeps passing.
 
-    REFERANSIN SINIRI — BU ORACLE BAĞIMSIZ DEĞİLDİR:
-    `shap.TreeExplainer` bu konfigürasyonda (LightGBM + objective='binary')
-    hesabı kendisi yapmaz; `shap/explainers/_tree.py` içinde
-    `original_model.predict(X, pred_contrib=True)` çağırarak DOĞRUDAN booster'a
-    delege eder. Yani karşılaştırdığımız iki taraf aynı sayısal kaynaktan
-    besleniyor ve bu test SHAP'in matematiğini DOĞRULAMAZ — böyle bir iddiada
-    bulunmamalı.
+    THE LIMIT OF THIS REFERENCE — IT IS NOT AN INDEPENDENT ORACLE:
+    In this configuration (LightGBM + objective='binary'), `shap.TreeExplainer`
+    does not do the computation itself; inside `shap/explainers/_tree.py` it calls
+    `original_model.predict(X, pred_contrib=True)` and DELEGATES straight to the
+    booster. So the two sides being compared are fed from the same numerical
+    source, and this test DOES NOT VERIFY SHAP's mathematics — it must not claim
+    to.
 
-    O hâlde neyi doğruluyor: kendi kodumuzun eşleme katmanını. `values` dizisini
-    `transformed_display_names` ile eşleştiren `zip`, `abs`'e göre sıralama ve
-    pozitif sınıf ekseni seçimi — bunların hepsi katkıları adlardan koparabilir
-    ve sonuç yine "geçerli" görünür. Öldürdüğü mutasyonlar: adların
-    kaydırılması/karıştırılması, `zip` off-by-one, yanlış satır seçimi,
-    sıralamanın değerleri adlardan koparması.
+    What it does verify, then: our own mapping layer. The `zip` that pairs the
+    `values` array with `transformed_display_names`, the sort by `abs`, and the
+    positive-class axis selection — any of these can tear the contributions away
+    from the names while the result still looks "valid". Mutations it kills:
+    shifted/shuffled names, an off-by-one `zip`, the wrong row selected, and a
+    sort that separates the values from the names.
     """
     payload = {
         "incident_severity": "Major Damage",
@@ -465,10 +453,10 @@ def test_shap_values_stay_aligned_with_the_booster_contributions(bundle: ModelBu
     result = bundle.predict(payload)
     by_feature = {item["feature"]: item["value"] for item in result["shap_values"]}
 
-    # Bizim temiz adlarımız booster'ın ham adlarıyla POZİSYON bazında eşleşmeli.
+    # Our clean names must correspond BY POSITION to the booster's raw names.
     for position, display_name in enumerate(bundle.display_names):
         assert by_feature[display_name] == contributions[0, position], (
-            f"'{display_name}' (pozisyon {position}) booster katkısıyla uyuşmuyor"
+            f"'{display_name}' (position {position}) disagrees with the booster contribution"
         )
 
     base_value = result["shap_values"][0]["base_value"]
@@ -476,46 +464,47 @@ def test_shap_values_stay_aligned_with_the_booster_contributions(bundle: ModelBu
 
 
 def test_shap_feature_names_follow_the_transformed_column_order(bundle: ModelBundle) -> None:
-    """Temiz adlar, booster'ın ham feature adlarının önek atılmış hâli olmalı.
+    """The clean names must be the booster's raw feature names with the prefix stripped.
 
-    Yukarıdaki oracle testi değerleri bağlar; bu da adlandırmanın kaynağını
-    bağlar. İkisi birlikte "i'inci katkı, i'inci feature'a aittir" iddiasını
-    her iki uçtan kapatır.
+    The oracle test above pins down the values; this one pins down where the naming
+    comes from. Together they close the claim "the i-th contribution belongs to the
+    i-th feature" from both ends.
     """
     raw_names = list(bundle.pipeline.named_steps["model"].booster_.feature_name())
     assert [name.split("__", 1)[-1] for name in raw_names] == bundle.display_names
 
 
 # --------------------------------------------------------------------------- #
-# 8) PII sızıntısı — /predict
+# 8) PII leakage — /predict
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize("payload", [PREDICT_REQUEST_EXAMPLE, {}])
 def test_predict_never_leaks_pii_column_names(client: TestClient, payload: dict) -> None:
-    """`/predict` yanıtının HAM METNİNDE PII kolon adı geçmez.
+    """No PII column name appears in the RAW TEXT of the `/predict` response.
 
-    `/predict` yanıtı girdiyi yankılamadığı için PII *değeri* zaten dönemez;
-    bu test şema genişletilirse (ör. "requestin echo'su" eklenirse) alarm verir.
+    Because `/predict` does not echo the input, a PII *value* cannot come back
+    anyway; this test raises the alarm if the schema is ever widened (e.g. if an
+    "echo of the request" is added).
     """
     raw = client.post("/predict", json=payload).text
     for column in PII_COLUMNS:
         assert column not in raw
-    # Atılan diğer kolonlar da yanıt yüzeyinde işi yok.
+    # The other dropped columns have no business on the response surface either.
     assert "auto_model" not in raw
     assert "incident_date" not in raw
 
 
 # --------------------------------------------------------------------------- #
-# 9) Şema <-> artefakt senkronu
+# 9) Schema <-> artifact sync
 # --------------------------------------------------------------------------- #
 
 
 def test_request_schema_covers_every_pipeline_input(bundle: ModelBundle) -> None:
-    """Pydantic modeli, pipeline'ın 34 girdisinin hepsini kapsıyor mu?
+    """Does the Pydantic model cover all 34 of the pipeline's inputs?
 
-    Eksik alan, o alanın API'den HİÇ verilememesi (hep default kalması)
-    demektir — sessiz bir işlevsellik kaybı.
+    A missing field means that field can NEVER be supplied through the API (it
+    always stays at its default) — a silent loss of functionality.
     """
     aliases = {
         field.alias or name for name, field in PredictRequest.model_fields.items()
@@ -524,11 +513,11 @@ def test_request_schema_covers_every_pipeline_input(bundle: ModelBundle) -> None
 
 
 def test_literal_choices_match_metadata(metadata: dict[str, Any]) -> None:
-    """Her kategorik alanın `Literal` seçenekleri eğitim kategorileriyle aynı.
+    """Every categorical field's `Literal` options match the training categories.
 
-    Kategori listeleri `schemas.py` içinde okunabilirlik için elle yazıldı;
-    bu test onları artefakta bağlar. Model yeniden eğitilip bir kategori
-    eklenirse/çıkarsa test kırmızıya döner — şema sessizce eskimez.
+    The category lists were hand-written in `schemas.py` for readability; this test
+    ties them back to the artifact. If the model is retrained and a category is
+    added or removed, the test goes red — the schema cannot go stale silently.
     """
     training_ranges = metadata["training_ranges"]
     question_mark_columns = set(
@@ -542,7 +531,7 @@ def test_literal_choices_match_metadata(metadata: dict[str, Any]) -> None:
     categorical = metadata["feature_list"]["categorical_features"]
     for column in categorical:
         field = PredictRequest.model_fields[column]
-        # Annotation: Literal[...] | None -> önce Optional'ı aç.
+        # Annotation: Literal[...] | None -> unwrap the Optional first.
         literal_args = set()
         for member in get_args(field.annotation):
             literal_args.update(get_args(member))
@@ -551,24 +540,25 @@ def test_literal_choices_match_metadata(metadata: dict[str, Any]) -> None:
         if column in question_mark_columns:
             expected.add("?")
 
-        assert literal_args == expected, f"'{column}' Literal seçenekleri metadata ile uyuşmuyor"
+        assert literal_args == expected, f"'{column}' Literal options disagree with the metadata"
 
 
 def test_numeric_bounds_are_supersets_of_training_ranges(metadata: dict[str, Any]) -> None:
-    """K5: Pydantic sınırı eğitim aralığını KAPSAMALI.
+    """K5: the Pydantic bound must CONTAIN the training range.
 
-    İki yönlü kontrol:
-      * Eğitimdeki bir değer 422 almamalı (sınır üst küme olmalı).
-      * `incident_hour_of_the_day` dışında sınır eğitim aralığına EŞİT
-        olmamalı; eşit olsaydı Faz 2 guardrail'i o alanda hiç tetiklenemezdi.
+    A check in both directions:
+      * A value from training must not get a 422 (the bound must be a superset).
+      * Except for `incident_hour_of_the_day`, the bound must NOT EQUAL the
+        training range; if it did, the Phase 2 guardrail could never fire on that
+        field.
     """
-    # Fiziksel sınırı gerçekten eğitim aralığıyla çakışan tek alan.
+    # The only field whose physical bound genuinely coincides with the training range.
     naturally_bounded = {"incident_hour_of_the_day"}
 
-    # Sınırları YAYINLANAN JSON Schema'dan okuyoruz, Pydantic'in iç
-    # alanlarından değil: frontend geliştiricisinin OpenAPI'de gördüğü
-    # sözleşmenin ta kendisi bu. `int | None` alanlarda kısıtlar
-    # anyOf'un null olmayan dalında durur.
+    # We read the bounds from the PUBLISHED JSON Schema, not from Pydantic's
+    # internal fields: this is the very contract a frontend developer sees in
+    # OpenAPI. On `int | None` fields the constraints live on the non-null branch
+    # of the anyOf.
     properties = PredictRequest.model_json_schema()["properties"]
 
     for column in metadata["feature_list"]["numeric_features"]:
@@ -577,41 +567,42 @@ def test_numeric_bounds_are_supersets_of_training_ranges(metadata: dict[str, Any
             for branch in properties[column].get("anyOf", [properties[column]])
             if branch.get("type") != "null"
         ]
-        assert len(branches) == 1, f"'{column}' için beklenmeyen şema dalı"
+        assert len(branches) == 1, f"unexpected schema branch for '{column}'"
         branch = branches[0]
 
-        assert "minimum" in branch and "maximum" in branch, f"'{column}' için ge/le tanımlı değil"
+        assert "minimum" in branch and "maximum" in branch, f"no ge/le defined for '{column}'"
         low, high = float(branch["minimum"]), float(branch["maximum"])
 
         train_min = float(metadata["training_ranges"][column]["min"])
         train_max = float(metadata["training_ranges"][column]["max"])
 
-        assert low <= train_min, f"'{column}' alt sınırı eğitim minimumunu kesiyor"
-        assert high >= train_max, f"'{column}' üst sınırı eğitim maksimumunu kesiyor"
+        assert low <= train_min, f"the lower bound of '{column}' cuts into the training minimum"
+        assert high >= train_max, f"the upper bound of '{column}' cuts into the training maximum"
 
         if column not in naturally_bounded:
             assert (low, high) != (train_min, train_max), (
-                f"'{column}' Pydantic sınırı eğitim aralığına eşit — guardrail tetiklenemez"
+                f"the Pydantic bound of '{column}' equals the training range — "
+                "the guardrail can never fire"
             )
 
 
 def test_training_extremes_are_accepted(client: TestClient, metadata: dict[str, Any]) -> None:
-    """Eğitim setinin min/max değerleri API'den geçebilmeli.
+    """The training set's min/max values must pass through the API.
 
-    Bir üstteki test sınırları statik karşılaştırıyor; bu test aynı iddiayı
-    gerçek HTTP isteğiyle kanıtlıyor.
+    The test above compares the bounds statically; this one proves the same claim
+    with a real HTTP request.
     """
     for column in metadata["feature_list"]["numeric_features"]:
         ranges = metadata["training_ranges"][column]
         for bound in ("min", "max"):
             response = client.post("/predict", json={column: ranges[bound]})
             assert response.status_code == 200, (
-                f"eğitimdeki {column}={ranges[bound]} reddedildi: {response.text}"
+                f"the training value {column}={ranges[bound]} was rejected: {response.text}"
             )
 
 
 # --------------------------------------------------------------------------- #
-# 10) risk_level eşikleri (K6)
+# 10) risk_level thresholds (K6)
 # --------------------------------------------------------------------------- #
 
 
@@ -628,7 +619,7 @@ def test_training_extremes_are_accepted(client: TestClient, metadata: dict[str, 
     ],
 )
 def test_risk_level_thresholds(probability: float, expected: str) -> None:
-    """Eşikler kapalı-alt/açık-üst: low < 0.35 <= medium < 0.65 <= high."""
+    """The thresholds are closed below / open above: low < 0.35 <= medium < 0.65 <= high."""
     assert classify_risk(probability) == expected
 
 
@@ -643,7 +634,7 @@ def test_cors_env_var_is_parsed_as_comma_separated_list(monkeypatch: pytest.Monk
 
 
 def test_cors_default_is_the_vite_dev_origin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Değişken hiç SET EDİLMEMİŞSE varsayılan devreye girer (hata değil)."""
+    """If the variable is NOT SET at all, the default applies (that is not an error)."""
     monkeypatch.delenv(ALLOWED_ORIGINS_ENV, raising=False)
     assert get_allowed_origins() == ["http://localhost:5173"]
     assert DEFAULT_ALLOWED_ORIGINS == "http://localhost:5173"
@@ -656,15 +647,16 @@ def test_cors_default_is_the_vite_dev_origin(monkeypatch: pytest.MonkeyPatch) ->
 def test_cors_wildcard_is_rejected_at_startup(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    """K10 artık ortam değişkeni yolunda da zorlanıyor (reviewer MAJOR-2).
+    """K10 is now enforced on the environment-variable path too (reviewer MAJOR-2).
 
-    Eskiden `ALLOWED_ORIGINS="*"` gerçek bir wildcard üretiyordu: kural sadece
-    varsayılan değerde geçerliydi, tek bir ortam değişkeniyle deliniyordu.
+    `ALLOWED_ORIGINS="*"` used to produce a real wildcard: the rule only held for
+    the default value and a single environment variable punched through it.
     """
     monkeypatch.setenv(ALLOWED_ORIGINS_ENV, value)
     with pytest.raises(CorsConfigurationError, match="wildcard"):
         get_allowed_origins()
-    # Uygulama da açılmamalı — hata yapılandırma katmanında kalmıyor.
+    # The application must not start either — the error does not stay in the
+    # configuration layer.
     with pytest.raises(CorsConfigurationError):
         create_app()
 
@@ -673,36 +665,37 @@ def test_cors_wildcard_is_rejected_at_startup(
 def test_cors_explicitly_empty_is_rejected_at_startup(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    """Boş `ALLOWED_ORIGINS` sessizce tüm istemcileri kapatmasın (MINOR-5)."""
+    """An empty `ALLOWED_ORIGINS` must not silently shut out every client (MINOR-5)."""
     monkeypatch.setenv(ALLOWED_ORIGINS_ENV, value)
-    with pytest.raises(CorsConfigurationError, match="geçerli origin"):
+    with pytest.raises(CorsConfigurationError, match="no valid origin"):
         get_allowed_origins()
 
 
 def test_cors_wiring_reflects_allowed_origin_and_rejects_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CORS KABLOLAMASININ kendisi test ediliyor (reviewer MAJOR-1).
+    """The CORS WIRING itself is under test (reviewer MAJOR-1).
 
-    `create_app()` fabrikası origin'leri çağrıldığı anda okuduğu için testler
-    ortamı değiştirip yeni bir uygulama kurabiliyor. Eskiden origin listesi
-    import anında dondurulduğundan bu yol test edilemiyordu — ve test
-    edilemeyen yolu reviewer'ın M21/M23/M24 mutasyonları sessizce geçmişti.
+    Because the `create_app()` factory reads the origins at call time, tests can
+    change the environment and build a fresh application. The origin list used to
+    be frozen at import time, which made this path untestable — and the reviewer's
+    M21/M23/M24 mutations passed silently through an untested path.
     """
-    monkeypatch.setenv(ALLOWED_ORIGINS_ENV, "https://izinli.example,https://ikinci.example")
+    monkeypatch.setenv(ALLOWED_ORIGINS_ENV, "https://allowed.example,https://second.example")
 
     with TestClient(create_app()) as scoped:
-        allowed = scoped.get("/health", headers={"Origin": "https://izinli.example"})
-        assert allowed.headers.get("access-control-allow-origin") == "https://izinli.example"
+        allowed = scoped.get("/health", headers={"Origin": "https://allowed.example"})
+        assert allowed.headers.get("access-control-allow-origin") == "https://allowed.example"
 
-        second = scoped.get("/health", headers={"Origin": "https://ikinci.example"})
-        assert second.headers.get("access-control-allow-origin") == "https://ikinci.example"
+        second = scoped.get("/health", headers={"Origin": "https://second.example"})
+        assert second.headers.get("access-control-allow-origin") == "https://second.example"
 
-        # İzinsiz origin yansıtılmamalı (M21: origin'i sabit kodlayan mutasyon).
-        denied = scoped.get("/health", headers={"Origin": "https://kotu.example"})
+        # A disallowed origin must not be reflected (M21: the mutation that
+        # hard-codes the origin).
+        denied = scoped.get("/health", headers={"Origin": "https://blocked.example"})
         assert denied.headers.get("access-control-allow-origin") is None
 
-        # Varsayılan origin artık listede olmadığı için o da yansıtılmamalı.
+        # The default origin is no longer on the list, so it must not be reflected either.
         stale = scoped.get("/health", headers={"Origin": "http://localhost:5173"})
         assert stale.headers.get("access-control-allow-origin") is None
 
@@ -710,18 +703,18 @@ def test_cors_wiring_reflects_allowed_origin_and_rejects_others(
 def test_cors_preflight_limits_methods_and_disables_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Preflight yanıtı yalnızca GET/POST'a izin verir, credentials kapalıdır.
+    """The preflight response allows GET/POST only and keeps credentials off.
 
-    M23 (`allow_methods=["*"]`) ve M24 (`allow_credentials=True`) mutasyonlarını
-    öldüren test budur.
+    This is the test that kills the M23 (`allow_methods=["*"]`) and M24
+    (`allow_credentials=True`) mutations.
     """
-    monkeypatch.setenv(ALLOWED_ORIGINS_ENV, "https://izinli.example")
+    monkeypatch.setenv(ALLOWED_ORIGINS_ENV, "https://allowed.example")
 
     with TestClient(create_app()) as scoped:
         preflight = scoped.options(
             "/predict",
             headers={
-                "Origin": "https://izinli.example",
+                "Origin": "https://allowed.example",
                 "Access-Control-Request-Method": "POST",
                 "Access-Control-Request-Headers": "content-type",
             },
@@ -733,20 +726,20 @@ def test_cors_preflight_limits_methods_and_disables_credentials(
             for m in preflight.headers.get("access-control-allow-methods", "").split(",")
             if m.strip()
         }
-        assert methods == {"GET", "POST"}, f"beklenmeyen metod kümesi: {methods}"
+        assert methods == {"GET", "POST"}, f"unexpected method set: {methods}"
         assert "*" not in preflight.headers.get("access-control-allow-methods", "")
 
-        # Credentials KAPALI olmalı: açık olsaydı başlık "true" olarak dönerdi.
+        # Credentials must be OFF: if they were on, the header would come back "true".
         assert preflight.headers.get("access-control-allow-credentials") is None
 
-        # Yasaklı bir metodun preflight'ı ONAYLANMAMALI.
-        # Starlette bu durumda 400 + "Disallowed CORS method" döner; origin
-        # başlığı yanıtta olsa da tarayıcı isteği yine de engeller, belirleyici
-        # olan durum kodudur.
+        # A preflight for a forbidden method must NOT be approved.
+        # Starlette returns 400 + "Disallowed CORS method" here; even if the origin
+        # header is present in the response, the browser still blocks the request —
+        # the status code is what decides.
         rejected = scoped.options(
             "/predict",
             headers={
-                "Origin": "https://izinli.example",
+                "Origin": "https://allowed.example",
                 "Access-Control-Request-Method": "DELETE",
             },
         )
@@ -755,44 +748,45 @@ def test_cors_preflight_limits_methods_and_disables_credentials(
 
 
 def test_cors_headers_are_present_on_error_responses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """413/422 gibi hata yanıtları da CORS başlıklarını almalı.
+    """Error responses such as 413/422 must carry the CORS headers too.
 
-    Aksi hâlde tarayıcı istemcisi hatayı okuyamaz, yalnızca opak bir ağ hatası
-    görür — middleware sırasının (CORS en dışta) somut gerekçesi budur.
+    Otherwise a browser client cannot read the error and only sees an opaque
+    network failure — that is the concrete reason for the middleware order (CORS
+    outermost).
     """
-    monkeypatch.setenv(ALLOWED_ORIGINS_ENV, "https://izinli.example")
+    monkeypatch.setenv(ALLOWED_ORIGINS_ENV, "https://allowed.example")
 
     with TestClient(create_app()) as scoped:
         invalid = scoped.post(
             "/predict",
             json={"witnesses": 999},
-            headers={"Origin": "https://izinli.example"},
+            headers={"Origin": "https://allowed.example"},
         )
         assert invalid.status_code == 422
-        assert invalid.headers.get("access-control-allow-origin") == "https://izinli.example"
+        assert invalid.headers.get("access-control-allow-origin") == "https://allowed.example"
 
         oversized = scoped.post(
             "/predict",
             content=b"x" * (MAX_REQUEST_BODY_BYTES + 1),
-            headers={"Origin": "https://izinli.example", "Content-Type": "application/json"},
+            headers={"Origin": "https://allowed.example", "Content-Type": "application/json"},
         )
         assert oversized.status_code == 413
-        assert oversized.headers.get("access-control-allow-origin") == "https://izinli.example"
+        assert oversized.headers.get("access-control-allow-origin") == "https://allowed.example"
 
 
 # --------------------------------------------------------------------------- #
-# 12) 422 gövdesi istemci verisini geri yansıtmamalı (reviewer MINOR-2)
+# 12) The 422 body must not echo client data (reviewer MINOR-2)
 # --------------------------------------------------------------------------- #
 
 
 def test_validation_error_does_not_echo_submitted_values(client: TestClient) -> None:
-    """Hatalı istekte gönderilen DEĞER yanıtta geçmemeli.
+    """The VALUE submitted in a bad request must not appear in the response.
 
-    Pydantic'in varsayılan gövdesi `input` alanında ham değeri geri yollar.
-    Bu API'ye giden gövde sigorta talebi verisidir; hatalı bir istek onu
-    log'lara, ters proxy'lere ve tarayıcı konsoluna taşırdı.
+    Pydantic's default body returns the raw value in an `input` field. The body
+    sent to this API is insurance claim data; a bad request would carry it into
+    logs, reverse proxies and the browser console.
     """
-    canary = "GIZLI-TALEP-VERISI-7f3a91"
+    canary = "SECRET-CLAIM-DATA-7f3a91"
     response = client.post(
         "/predict",
         json={"insured_hobbies": canary, "witnesses": 4242, "policy_annual_premium": -12345.6},
@@ -800,17 +794,17 @@ def test_validation_error_does_not_echo_submitted_values(client: TestClient) -> 
 
     assert response.status_code == 422
     raw = response.text
-    assert canary not in raw, "gönderilen değer yanıtta yankılandı"
+    assert canary not in raw, "the submitted value was echoed in the response"
     assert "4242" not in raw
     assert "12345.6" not in raw
 
-    # `input` ve `ctx` alanları tamamen düşmüş olmalı.
+    # The `input` and `ctx` fields must be gone entirely.
     for error in response.json()["detail"]:
         assert set(error) == {"loc", "msg", "type"}
 
 
 def test_validation_error_still_tells_which_field_failed(client: TestClient) -> None:
-    """Sanitizasyon teşhis değerini BOZMAMALI — frontend alan bazlı hata gösterir."""
+    """Sanitisation must NOT destroy diagnostic value — the frontend shows per-field errors."""
     response = client.post("/predict", json={"witnesses": 999, "age": 5})
     assert response.status_code == 422
 
@@ -820,31 +814,31 @@ def test_validation_error_still_tells_which_field_failed(client: TestClient) -> 
 
     for error in detail:
         assert error["loc"][0] == "body"
-        assert error["msg"], "hata mesajı boş kalmamalı"
-        assert error["type"], "makine-okunur hata tipi kaybolmamalı"
+        assert error["msg"], "the error message must not be empty"
+        assert error["type"], "the machine-readable error type must not be lost"
 
 
 def test_unknown_field_error_names_the_field_but_not_its_value(client: TestClient) -> None:
-    """Bilinmeyen alanda ANAHTAR adı döner, DEĞER dönmez."""
-    response = client.post("/predict", json={"gizli_alan": "cok-gizli-deger-991"})
+    """On an unknown field the KEY name comes back, the VALUE does not."""
+    response = client.post("/predict", json={"secret_field": "very-secret-value-991"})
     assert response.status_code == 422
-    assert "gizli_alan" in response.text
-    assert "cok-gizli-deger-991" not in response.text
+    assert "secret_field" in response.text
+    assert "very-secret-value-991" not in response.text
 
 
 # --------------------------------------------------------------------------- #
-# 13) Gövde boyut sınırı (reviewer MINOR-6)
+# 13) Body size limit (reviewer MINOR-6)
 # --------------------------------------------------------------------------- #
 
 
 def test_body_within_limit_is_processed_normally(client: TestClient) -> None:
-    """Sınırın altındaki gövde normal akışa girer (200 ya da 422)."""
+    """A body under the limit enters the normal flow (200 or 422)."""
     response = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE)
     assert response.status_code == 200
 
 
 def test_oversized_body_is_rejected_with_413(client: TestClient) -> None:
-    """`Content-Length` ile bildirilen büyük gövde okunmadan reddedilir."""
+    """A large body declared via `Content-Length` is rejected before being read."""
     payload = b'{"insured_hobbies":"' + b"a" * (MAX_REQUEST_BODY_BYTES + 1) + b'"}'
     response = client.post(
         "/predict", content=payload, headers={"Content-Type": "application/json"}
@@ -854,10 +848,10 @@ def test_oversized_body_is_rejected_with_413(client: TestClient) -> None:
 
 
 def test_oversized_chunked_body_is_rejected_with_413(client: TestClient) -> None:
-    """`Content-Length` YOKKEN de korunmalıyız (chunked transfer encoding).
+    """We must be protected when there is NO `Content-Length` (chunked transfer encoding).
 
-    Sadece başlığa güvenmek, başlığı hiç göndermeyen bir istemciye sınırsız
-    gövde hakkı tanımak olurdu.
+    Trusting the header alone would grant an unbounded body to any client that
+    simply omits it.
     """
 
     def chunks() -> Any:
@@ -873,9 +867,9 @@ def test_oversized_chunked_body_is_rejected_with_413(client: TestClient) -> None
 
 
 def test_body_just_under_the_limit_reaches_validation(client: TestClient) -> None:
-    """Sınırın hemen altındaki gövde 413 DEĞİL, normal doğrulama hatası alır.
+    """A body just under the limit gets a normal validation error, NOT a 413.
 
-    Sınırın yanlış tarafa kaymadığını (off-by-one) kanıtlar.
+    Proves the limit has not slipped to the wrong side (off-by-one).
     """
     filler = "a" * (MAX_REQUEST_BODY_BYTES - 200)
     response = client.post(
@@ -885,42 +879,43 @@ def test_body_just_under_the_limit_reaches_validation(client: TestClient) -> Non
 
 
 # --------------------------------------------------------------------------- #
-# 14) OpenAPI yüzeyi (reviewer MINOR-3)
+# 14) The OpenAPI surface (reviewer MINOR-3)
 # --------------------------------------------------------------------------- #
 
 
 def test_openapi_does_not_leak_internal_or_pii_names(client: TestClient) -> None:
-    """`/openapi.json` de public bir yüzeydir ve taranmalıdır.
+    """`/openapi.json` is a public surface too and must be scanned.
 
-    Yasaklı adlar `/model-info` yanıtından çıkarılmıştı ama class docstring'leri
-    üzerinden OpenAPI `description` alanlarına sızıyordu. Açıklamalar `#`
-    yorumlarına taşındı; bu test yüzeyin temiz kalmasını garanti eder.
+    The forbidden names had been removed from the `/model-info` response but were
+    leaking into the OpenAPI `description` fields through class docstrings. The
+    explanations were moved into `#` comments; this test guarantees the surface
+    stays clean.
     """
     response = client.get("/openapi.json")
     assert response.status_code == 200
 
     raw = response.text
     for key in (*FORBIDDEN_MODEL_INFO_KEYS, "n_estimators", "learning_rate", *PII_COLUMNS):
-        assert key not in raw, f"'{key}' /openapi.json içine sızmış"
+        assert key not in raw, f"'{key}' leaked into /openapi.json"
 
 
 def test_openapi_still_documents_the_public_contract(client: TestClient) -> None:
-    """Sızıntı temizliği dokümantasyonu boşaltmamalı."""
+    """Cleaning up the leak must not empty out the documentation."""
     spec = client.get("/openapi.json").json()
     assert set(spec["paths"]) == {"/health", "/predict", "/model-info"}
     assert "capital-gains" in spec["components"]["schemas"]["PredictRequest"]["properties"]
 
 
 # --------------------------------------------------------------------------- #
-# 15) Eş zamanlılık ve tek-dönüşüm kısayolu (reviewer MINOR-4 + regresyon)
+# 15) Concurrency and the single-transform shortcut (reviewer MINOR-4 + regression)
 # --------------------------------------------------------------------------- #
 
 
 def test_concurrent_predictions_are_bitwise_identical(client: TestClient) -> None:
-    """50 paralel `/predict` aynı girdi için bit bazında aynı sonucu vermeli.
+    """50 parallel `/predict` calls must give a bit-identical result for the same input.
 
-    Paylaşılan durum (`explainer.expected_value` her çağrıda yeniden atanıyor)
-    kilitle korunuyor; bu test o korumanın regresyonunu yakalar.
+    The shared state (`explainer.expected_value` is reassigned on every call) is
+    protected by a lock; this test catches a regression of that protection.
     """
     workers = 50
 
@@ -936,11 +931,12 @@ def test_concurrent_predictions_are_bitwise_identical(client: TestClient) -> Non
 
 
 def test_split_transform_matches_full_pipeline_bitwise(bundle: ModelBundle) -> None:
-    """`predict()` kısayolu tam `pipeline.predict_proba` ile aynı sonucu verir.
+    """The `predict()` shortcut gives the same result as the full `pipeline.predict_proba`.
 
-    `predict()` performans için preprocessor'ı bir kez çalıştırıp aynı matrisi
-    hem modele hem explainer'a veriyor. Bu test kısayolun sessizce sapmadığını
-    kanıtlar (açılışta da `_verify_transform_equivalence` ile kontrol edilir).
+    For performance, `predict()` runs the preprocessor once and hands the same
+    matrix to both the model and the explainer. This test proves the shortcut has
+    not drifted silently (it is also checked at startup by
+    `_verify_transform_equivalence`).
     """
     payload = PredictRequest(**PREDICT_REQUEST_EXAMPLE).model_dump(by_alias=True)
     frame = bundle.prepare_row(payload)
@@ -953,28 +949,28 @@ def test_split_transform_matches_full_pipeline_bitwise(bundle: ModelBundle) -> N
 
 
 # --------------------------------------------------------------------------- #
-# 16) Kütüphane sürüm sapması (reviewer C1)
+# 16) Library version drift (reviewer C1)
 # --------------------------------------------------------------------------- #
 
 
 def test_version_drift_emits_a_warning(
     bundle: ModelBundle, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Eğitim ve çalışma zamanı sürümleri ayrışırsa UYARI basılır.
+    """If the training and runtime versions diverge, a WARNING is emitted.
 
-    Patlatmıyoruz: sürüm sapması çoğu zaman zararsızdır ve her sapmada açılışı
-    reddetmek Faz 7'de deploy'u gereksiz yere kilitlerdi. Ama sessiz kalmak,
-    "model neden farklı skor veriyor?" sorusunun en pahalı hâlidir.
+    We do not fail: version drift is usually harmless, and refusing to start on
+    every drift would needlessly block the Phase 7 deploy. But staying silent is
+    the most expensive form of "why is the model scoring differently?".
     """
     drifted = copy.deepcopy(bundle.metadata)
-    drifted["library_versions"]["lightgbm"] = "0.0.1-eski"
-    drifted["library_versions"]["scikit-learn"] = "0.0.2-eski"
+    drifted["library_versions"]["lightgbm"] = "0.0.1-old"
+    drifted["library_versions"]["scikit-learn"] = "0.0.2-old"
 
     probe = ModelBundle(bundle.pipeline, drifted)
     with caplog.at_level(logging.WARNING, logger="app.model"):
         probe._warn_on_library_version_drift()
 
-    assert "sürüm sapması" in caplog.text
+    assert "version drift" in caplog.text
     assert "lightgbm" in caplog.text
     assert "scikit-learn" in caplog.text
 
@@ -982,30 +978,30 @@ def test_version_drift_emits_a_warning(
 def test_no_warning_when_versions_match(
     bundle: ModelBundle, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Sürümler uyuşuyorsa log kirletilmez."""
+    """If the versions agree, the log is not polluted."""
     with caplog.at_level(logging.WARNING, logger="app.model"):
         bundle._warn_on_library_version_drift()
-    assert "sürüm sapması" not in caplog.text
+    assert "version drift" not in caplog.text
 
 
 def test_version_drift_is_not_exposed_on_health(client: TestClient) -> None:
-    """Sapma bilgisi API sözleşmesine sızmaz — operatör sinyali, istemci verisi değil."""
+    """Drift information does not leak into the API contract — an operator signal, not client data."""
     body = client.get("/health").json()
     assert set(body) == {"status", "model_loaded", "model_version"}
 
 
 # --------------------------------------------------------------------------- #
-# 17) Feature etki verisi (F9) — "işaretle ve göster" kararının API tarafı
+# 17) Feature influence data (F9) — the API side of the "flag and show" decision
 # --------------------------------------------------------------------------- #
 
 
 def test_feature_influence_is_in_metadata_and_covers_every_field(
     metadata: dict[str, Any],
 ) -> None:
-    """34 feature'ın hepsi için ölçüm var ve anahtarlar API alan adlarıyla birebir.
+    """There is a measurement for all 34 features and the keys match the API field names.
 
-    Anahtarların API adlarıyla eşleşmesi şart: frontend ayrı bir eşleme tablosu
-    tutmak zorunda kalırsa o tablo model değişince sessizce eskir.
+    Matching the API names is essential: if the frontend had to keep a separate
+    mapping table, that table would go stale silently when the model changed.
     """
     influence = metadata["feature_influence"]
     features = influence["features"]
@@ -1013,7 +1009,7 @@ def test_feature_influence_is_in_metadata_and_covers_every_field(
     assert len(features) == 34
     assert set(features) == set(metadata["feature_list"]["pipeline_input_order"])
 
-    # Tireli alan adı korunmalı (Pydantic alias'ı ile aynı).
+    # The hyphenated field name must be preserved (same as the Pydantic alias).
     assert "capital-gains" in features
     assert "capital_gains" not in features
 
@@ -1027,7 +1023,7 @@ def test_feature_influence_is_in_metadata_and_covers_every_field(
 def test_feature_influence_summary_matches_the_per_feature_data(
     metadata: dict[str, Any],
 ) -> None:
-    """Özet sayılar detayla tutarlı — özet elle yazılmış bir sabit değil."""
+    """The summary numbers agree with the detail — the summary is not a hand-written constant."""
     influence = metadata["feature_influence"]
     features = influence["features"]
     summary = influence["summary"]
@@ -1044,16 +1040,16 @@ def test_feature_influence_summary_matches_the_per_feature_data(
 def test_sixteen_features_are_dead_and_insured_sex_is_one_of_them(
     metadata: dict[str, Any],
 ) -> None:
-    """Ölçülen gerçek: 16 feature ölü, `insured_sex` bunlardan biri."""
+    """The measured fact: 16 features are dead, and `insured_sex` is one of them."""
     summary = metadata["feature_influence"]["summary"]
 
     assert summary["n_without_influence"] == 16
     assert summary["n_with_influence"] == 18
     assert "insured_sex" in summary["features_without_influence"]
-    # Fairness beyanını doğrudan ilgilendiren diğer ölüler.
+    # The other dead features that bear directly on the fairness declaration.
     for feature in ("insured_relationship", "policy_state", "incident_state"):
         assert feature in summary["features_without_influence"]
-    # Gerçekten kullanılanlar ölü listesinde OLMAMALI.
+    # The ones genuinely in use must NOT be on the dead list.
     for feature in ("insured_hobbies", "incident_severity", "age", "insured_education_level"):
         assert feature not in summary["features_without_influence"]
 
@@ -1061,10 +1057,10 @@ def test_sixteen_features_are_dead_and_insured_sex_is_one_of_them(
 def test_feature_influence_matches_the_booster_exactly(
     bundle: ModelBundle, metadata: dict[str, Any]
 ) -> None:
-    """Metadata'daki sayılar booster'dan hesaplananla BİREBİR aynı.
+    """The numbers in the metadata are IDENTICAL to those computed from the booster.
 
-    Elle yazılmış sabit olmadığının kanıtı: aynı sayıyı bağımsız olarak
-    booster'dan okuyup karşılaştırıyoruz.
+    Proof that they are not hand-written constants: we read the same number
+    independently from the booster and compare.
     """
     booster = bundle.pipeline.named_steps["model"].booster_
     split_counts = booster.feature_importance(importance_type="split")
@@ -1079,7 +1075,7 @@ def test_feature_influence_matches_the_booster_exactly(
 
 
 def test_model_info_exposes_feature_influence(client: TestClient) -> None:
-    """`/model-info` bölümü döndürüyor ve beyaz liste bozulmamış."""
+    """`/model-info` returns the section and the allowlist is intact."""
     response = client.get("/model-info")
     assert response.status_code == 200
     body = response.json()
@@ -1091,18 +1087,18 @@ def test_model_info_exposes_feature_influence(client: TestClient) -> None:
     assert influence["features"]["insured_hobbies"]["has_influence"] is True
     assert "capital-gains" in influence["features"]
 
-    # Beyaz liste hâlâ sızdırmıyor.
+    # The allowlist still does not leak.
     raw = response.text
     for key in FORBIDDEN_MODEL_INFO_KEYS:
         assert key not in raw
 
 
 def test_dead_features_have_exactly_zero_shap_value(client: TestClient) -> None:
-    """`has_influence: false` olan her feature'ın SHAP katkısı TAM 0.0.
+    """Every feature with `has_influence: false` has a SHAP contribution of EXACTLY 0.0.
 
-    `feature_influence` sözleşmesinin uçtan uca doğrulaması: frontend "bu alan
-    modeli etkilemiyor" rozetini bu veriye dayanarak basacak, dolayısıyla
-    rozetin gerçekle uyuştuğunu kanıtlamak zorundayız.
+    An end-to-end verification of the `feature_influence` contract: the frontend
+    renders the "this field does not affect the model" badge from this data, so we
+    have to prove the badge matches reality.
     """
     influence = client.get("/model-info").json()["feature_influence"]["features"]
     shap_values = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()["shap_values"]
@@ -1112,22 +1108,23 @@ def test_dead_features_have_exactly_zero_shap_value(client: TestClient) -> None:
     assert len(dead) == 16
 
     for name in dead:
-        assert by_feature[name] == 0.0, f"'{name}' ölü ama SHAP katkısı sıfır değil"
+        assert by_feature[name] == 0.0, f"'{name}' is dead but its SHAP contribution is not zero"
 
-    # Ters yön: etkili feature'ların hepsi sıfır olsaydı test anlamsız olurdu.
+    # The other direction: if every influential feature were zero too, the test
+    # would be meaningless.
     alive = [name for name, entry in influence.items() if entry["has_influence"]]
     assert any(by_feature[name] != 0.0 for name in alive)
 
 
 # --------------------------------------------------------------------------- #
-# 18) Fairness: beyan ile ölçüm ayrıştırıldı (F10)
+# 18) Fairness: declaration separated from measurement (F10)
 # --------------------------------------------------------------------------- #
 
 
 def test_fairness_entries_carry_both_declaration_and_measurement(
     client: TestClient,
 ) -> None:
-    """Her korunan/vekil nitelikte hem beyan hem ölçüm alanı var."""
+    """Every protected/proxy attribute carries both a declaration and a measurement field."""
     fairness = client.get("/model-info").json()["fairness"]
     entries = (
         fairness["protected_attributes_used_as_features"] + fairness["proxy_risk_attributes"]
@@ -1135,7 +1132,7 @@ def test_fairness_entries_carry_both_declaration_and_measurement(
     assert entries
 
     for entry in entries:
-        assert entry["used_as_model_feature"] is True, "beyan korunmalı"
+        assert entry["used_as_model_feature"] is True, "the declaration must be preserved"
         assert isinstance(entry["split_count"], int)
         assert entry["has_influence"] == (entry["split_count"] > 0)
 
@@ -1143,10 +1140,10 @@ def test_fairness_entries_carry_both_declaration_and_measurement(
 def test_fairness_split_counts_come_from_the_booster(
     client: TestClient, bundle: ModelBundle
 ) -> None:
-    """Fairness bölümündeki `split_count` booster'dan hesaplananla birebir aynı.
+    """The `split_count` in the fairness section is identical to the booster's number.
 
-    Elle yazılmış sabit OLMADIĞININ kanıtı. Mutasyonla da doğrulandı: sayıyı
-    sabitleyen bir değişiklik bu testi kırmızıya döndürür.
+    Proof that it is NOT a hand-written constant. Also verified by mutation: a
+    change that pins the number turns this test red.
     """
     booster = bundle.pipeline.named_steps["model"].booster_
     split_counts = booster.feature_importance(importance_type="split")
@@ -1165,7 +1162,7 @@ def test_fairness_split_counts_come_from_the_booster(
 
 
 def test_fairness_reports_measured_zero_influence_for_sex(client: TestClient) -> None:
-    """`insured_sex` beyan olarak verilmiş ama ölçülen etkisi sıfır."""
+    """`insured_sex` was declared as given, but its measured influence is zero."""
     fairness = client.get("/model-info").json()["fairness"]
     by_feature = {
         entry["feature"]: entry for entry in fairness["protected_attributes_used_as_features"]
@@ -1176,42 +1173,68 @@ def test_fairness_reports_measured_zero_influence_for_sex(client: TestClient) ->
     assert sex["split_count"] == 0
     assert sex["has_influence"] is False
 
-    # Yaş ise gerçekten kullanılıyor — ölçüm ayrımı anlamlı çalışıyor.
+    # Age, on the other hand, really is used — so the measurement distinction works.
     assert by_feature["age"]["has_influence"] is True
 
 
-def test_fairness_does_not_claim_the_model_is_fair(client: TestClient) -> None:
-    """Ölçüm eklendi diye "model adil" sonucuna ATLANMAMALI.
+# Phrases that would exculpate the model. Each may appear ONLY inside a sentence
+# that also negates or qualifies it.
+EXCULPATORY_PHRASES = (
+    "the model is fair",
+    "does not discriminate",
+    "no discrimination",
+    "free of bias",
+    "unbiased",
+)
 
-    `has_influence: false` yalnızca "bu eğitilmiş ağaç kümesinde ölçülen etki
-    sıfır" demektir. Denetim hâlâ yapılmadı ve vekil feature'lar sinyali geri
-    taşıyabilir; model card bunu açıkça söylemek zorunda.
+# Markers that turn an exculpatory phrase into a disclaimer rather than a claim.
+DISCLAIMER_MARKERS = ("not mean", "not a substitute", "not prove", "cannot be concluded")
+
+
+def test_fairness_does_not_claim_the_model_is_fair(client: TestClient) -> None:
+    """Adding a measurement must NOT be turned into "the model is fair".
+
+    `has_influence: false` only means "the measured influence in this trained set
+    of trees is zero". The audit still has not been performed and proxy features
+    can carry the signal back; the model card has to say so explicitly.
+
+    HOW THE NEGATIVE CHECK WORKS: a plain "this phrase must not appear" test does
+    not survive translation — the honest text itself contains "the model is fair"
+    inside the sentence "That DOES NOT MEAN the model is fair". So the check is
+    made SENTENCE BY SENTENCE: an exculpatory phrase is allowed only when the same
+    sentence also carries a disclaimer marker. A rewrite that drops the negation
+    turns this red, which is exactly the failure worth catching.
     """
     fairness = client.get("/model-info").json()["fairness"]
 
     assert fairness["audit_performed"] is False
     assert fairness["status"] == "declared_not_audited"
     assert fairness["audit_metrics_computed"] == []
-    assert fairness["production_requirements"], "üretim gereklilikleri silinmemeli"
+    assert fairness["production_requirements"], "the production requirements must not be deleted"
 
-    text = _fold(fairness["notes"] + " " + fairness["field_semantics"])
-    # Ölçümün sınırları açıkça yazılmış olmalı.
-    assert "denetim" in text
-    assert "vekil" in text
-    assert "anlamina gelmez" in text or "yerine gecmez" in text
+    text = (fairness["notes"] + " " + fairness["field_semantics"]).lower()
 
-    # Kesin/aklayıcı bir iddia geçmemeli.
-    for forbidden in ("model adil", "ayrimcilik yok", "ayrimcilik yapmiyor", "bias yok"):
-        assert forbidden not in text, f"aşırı iddia: {forbidden!r}"
+    # The limits of the measurement must be stated explicitly.
+    assert "audit" in text
+    assert "proxy" in text
+    assert any(marker in text for marker in DISCLAIMER_MARKERS)
+
+    # No sentence may make an exculpatory claim without qualifying it.
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        for phrase in EXCULPATORY_PHRASES:
+            if phrase in sentence:
+                assert any(marker in sentence for marker in DISCLAIMER_MARKERS), (
+                    f"unqualified exculpatory claim: {sentence.strip()!r}"
+                )
 
 
 # --------------------------------------------------------------------------- #
-# 12) Doğrudan model katmanı
+# 19) The model layer, called directly
 # --------------------------------------------------------------------------- #
 
 
 def test_bundle_predict_matches_endpoint(client: TestClient, bundle: ModelBundle) -> None:
-    """HTTP katmanı hesap yapmıyor: endpoint çıktısı = bundle çıktısı."""
+    """The HTTP layer performs no computation: endpoint output = bundle output."""
     direct = bundle.predict(PredictRequest(**PREDICT_REQUEST_EXAMPLE).model_dump(by_alias=True))
     via_http = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     assert direct["fraud_probability"] == pytest.approx(via_http["fraud_probability"], abs=0)
@@ -1219,11 +1242,11 @@ def test_bundle_predict_matches_endpoint(client: TestClient, bundle: ModelBundle
 
 
 def test_unknown_category_never_reaches_the_model(bundle: ModelBundle) -> None:
-    """Encoder'ın -1 yolu API üzerinden ERİŞİLEMEZ olmalı.
+    """The encoder's -1 path must be UNREACHABLE through the API.
 
-    Pipeline `unknown_value=-1` ile kurulu, yani bilinmeyen kategori sessizce
-    -1'e kodlanır. `Literal` bunu API seviyesinde kapattığı için tek bir
-    kategorik alanda bile -1 görmemeliyiz.
+    The pipeline is configured with `unknown_value=-1`, so an unknown category is
+    silently encoded as -1. Because `Literal` closes that off at the API level, we
+    must not see -1 on a single categorical field.
     """
     preprocessor = bundle.pipeline.named_steps["preprocessor"]
     frame = bundle.prepare_row(PredictRequest(**PREDICT_REQUEST_EXAMPLE).model_dump(by_alias=True))
@@ -1231,41 +1254,41 @@ def test_unknown_category_never_reaches_the_model(bundle: ModelBundle) -> None:
 
     categorical = [c for c in transformed.columns if c.startswith("cat__")]
     codes = transformed[categorical].to_numpy(dtype=float)
-    assert not np.any(codes < 0), "geçerli bir istekte bilinmeyen kategori (-1) oluştu"
+    assert not np.any(codes < 0), "an unknown category (-1) appeared on a valid request"
 
 
 # --------------------------------------------------------------------------- #
-# 19) Doğrulama turu — hayatta kalan mutasyonların kapatılması
+# 20) Verification round — closing the mutations that survived
 # --------------------------------------------------------------------------- #
 #
-# Aşağıdaki dört test, önceki turda MUTASYONLA ÖLDÜRÜLEMEYEN iddiaları bağlar.
-# Bir iddianın metinde yazılı olması onu doğru yapmaz; her biri ancak ilgili
-# kodu bozunca kırmızıya dönen bir testle kanıtlanmış sayılır.
+# The four tests below pin down claims that could NOT BE KILLED BY MUTATION in the
+# previous round. A claim being written in prose does not make it true; each one
+# counts as proven only once a test goes red when the relevant code is broken.
 
 
 def test_shap_lock_is_actually_held_during_explanation(
     bundle: ModelBundle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Explainer çağrılırken `_shap_lock` GERÇEKTEN tutuluyor olmalı.
+    """`_shap_lock` must GENUINELY be held while the explainer runs.
 
-    NEDEN AYRI BİR TEST GEREKTİ (hayatta kalan mutasyon A-M8):
-    `test_concurrent_predictions_are_bitwise_identical` kilidi kaldıran
-    mutasyonu ÖLDÜREMİYOR ve bu şaşırtıcı değil — shap'in her çağrıda yeniden
-    atadığı `expected_value` hep AYNI değere ayarlanıyor, dolayısıyla yarış
-    durumu çıktıda gözlemlenebilir bir fark üretmiyor. Yani kilit, bugün
-    ölçülebilir bir bug'ı değil, kütüphanenin paylaşılan durumu mutasyona
-    uğratma DAVRANIŞINI kapatıyor; korunan şey gelecekteki bir shap sürümünde
-    o değerin girdiye bağlı hâle gelmesi.
+    WHY A SEPARATE TEST WAS NEEDED (surviving mutation A-M8):
+    `test_concurrent_predictions_are_bitwise_identical` CANNOT KILL the mutation
+    that removes the lock, and that is not surprising — the `expected_value` shap
+    reassigns on every call is always set to the SAME value, so the race produces
+    no observable difference in the output. The lock therefore closes off not a
+    measurable bug today but the library's BEHAVIOUR of mutating shared state;
+    what it protects against is a future shap release where that value becomes
+    input-dependent.
 
-    Sonuç bazlı bir test bunu asla kanıtlayamaz, o yüzden korumanın kendisini
-    doğrudan gözlemliyoruz: açıklama üretilirken kilit tutuluyor mu?
-    `with self._shap_lock:` satırı silinirse burası kırmızıya döner.
+    An outcome-based test can never prove that, so we observe the protection
+    directly: is the lock held while the explanation is produced? If the
+    `with self._shap_lock:` line is deleted, this goes red.
     """
     original_explainer = bundle.explainer
     lock_states: list[bool] = []
 
     class _LockObservingExplainer:
-        """Explainer'ı sarmalar; çağrıldığı ANDA kilidin durumunu kaydeder."""
+        """Wraps the explainer; records the lock state AT THE MOMENT it is called."""
 
         def __call__(self, transformed: Any) -> Any:
             lock_states.append(bundle._shap_lock.locked())
@@ -1275,20 +1298,21 @@ def test_shap_lock_is_actually_held_during_explanation(
     bundle.predict(PREDICT_REQUEST_EXAMPLE)
 
     assert lock_states == [True], (
-        "SHAP açıklaması kilit tutulmadan üretildi — paylaşılan explainer "
-        "durumu eş zamanlı isteklere açık."
+        "the SHAP explanation was produced without holding the lock — the shared "
+        "explainer state is exposed to concurrent requests."
     )
 
 
 def test_load_runs_every_startup_verification(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`ModelBundle.load()` beş açılış doğrulamasının HEPSİNİ çağırmalı.
+    """`ModelBundle.load()` must call ALL FIVE startup verifications.
 
-    NEDEN AYRI BİR TEST GEREKTİ (hayatta kalan mutasyon):
-    `_verify_transform_equivalence()` ÇAĞRISINI `load()` içinden silen mutasyon
-    tüm suite'i yeşil bırakıyordu. Metodun kendisi test ediliyordu, çağrıldığı
-    ise değil — artefakt zaten tutarlı olduğu için doğrulamayı atlamak hiçbir
-    gözlemlenebilir fark yaratmıyor. Ama koruma tam da tutarsız bir artefakt
-    içindir: sessizce kaldırılırsa fail-fast garantisi kâğıt üstünde kalır.
+    WHY A SEPARATE TEST WAS NEEDED (surviving mutation):
+    The mutation that deletes the CALL to `_verify_transform_equivalence()` from
+    `load()` left the whole suite green. The method itself was tested, but not the
+    fact that it is called — because the artifact is already consistent, skipping
+    the verification makes no observable difference. Yet the protection exists
+    precisely for an inconsistent artifact: remove it silently and the fail-fast
+    guarantee is only on paper.
     """
     verifications = (
         "_verify_contract",
@@ -1314,36 +1338,36 @@ def test_load_runs_every_startup_verification(monkeypatch: pytest.MonkeyPatch) -
     ModelBundle.load()
 
     assert set(called) == set(verifications), (
-        f"açılışta atlanan doğrulama(lar): {sorted(set(verifications) - set(called))}"
+        f"verification(s) skipped at startup: {sorted(set(verifications) - set(called))}"
     )
-    # Sözleşme kontrolü ÖNCE gelmeli: diğer doğrulamalar metadata'nın
-    # beklenen şekilde olduğunu varsayarak çalışıyor.
+    # The contract check must come FIRST: the other verifications work on the
+    # assumption that the metadata has the expected shape.
     assert called[0] == "_verify_contract"
 
 
 def test_dead_features_change_neither_the_score_nor_their_own_shap_value(
     bundle: ModelBundle, metadata: dict[str, Any]
 ) -> None:
-    """Ölü feature'ın DEĞERİ değişince ne olasılık ne de SHAP katkısı değişir.
+    """Changing a dead feature's VALUE changes neither the probability nor its SHAP contribution.
 
-    NEDEN AYRI BİR TEST GEREKTİ (fairness metninin aşırı-iddia denetimi):
-    `fairness.field_semantics` şunu iddia ediyor — "split_count=0 olan bir
-    feature bu eğitilmiş modelde hiçbir tahmini etkilemez ve SHAP katkısı HER
-    ZAMAN tam 0.0'dır". Bu metin `/model-info` üzerinden sigorta müşterisine
-    gösterilecek. Mevcut `test_dead_features_have_exactly_zero_shap_value` bunu
-    TEK bir girdi üzerinde ölçüyordu; "her zaman" iddiası tek örnekle
-    kanıtlanmaz.
+    WHY A SEPARATE TEST WAS NEEDED (auditing the fairness text for overclaiming):
+    `fairness.field_semantics` claims that "a feature with split_count=0 cannot
+    affect any prediction in this trained model, and its SHAP contribution is
+    ALWAYS exactly 0.0". That text is shown to an insurance client through
+    `/model-info`. The existing `test_dead_features_have_exactly_zero_shap_value`
+    measured it on ONE input; an "always" claim is not proven by a single example.
 
-    Burada her ölü feature'ın eğitimde görülen DEĞER UÇLARINI tek tek deneyip
-    iki şeyi birden kanıtlıyoruz: (1) skor bit bazında sabit kalıyor,
-    (2) o feature'ın kendi SHAP katkısı tam 0.0. `insured_sex` ve
-    `insured_relationship` de bu kümede — yani "cinsiyeti değiştirmek skoru
-    değiştirmiyor" artık bir beyan değil, ölçüm.
+    Here we try each dead feature's EXTREME values from training one by one and
+    prove two things at once: (1) the score stays bit-identical, (2) that feature's
+    own SHAP contribution is exactly 0.0. `insured_sex` and `insured_relationship`
+    are in this set too — so "changing sex does not change the score" is now a
+    measurement, not a declaration.
 
-    DİKKAT — BU BİR FAIRNESS DENETİMİ DEĞİLDİR. Kanıtlanan tek şey, BU eğitilmiş
-    ağaç kümesinde bu kolonların doğrudan etkisinin sıfır olduğudur. Vekil
-    feature'lar (meslek, hobi, coğrafya) aynı sinyali dolaylı taşıyabilir ve
-    grup bazlı hiçbir metrik hesaplanmadı — `fairness.notes` bunu zaten söylüyor.
+    CAUTION — THIS IS NOT A FAIRNESS AUDIT. The only thing proven is that the
+    direct effect of these columns in THIS trained set of trees is zero. Proxy
+    features (occupation, hobbies, geography) can carry the same signal
+    indirectly, and no group-level metric was computed — `fairness.notes` already
+    says so.
     """
     influence = metadata["feature_influence"]["features"]
     ranges = metadata["training_ranges"]
@@ -1352,7 +1376,7 @@ def test_dead_features_change_neither_the_score_nor_their_own_shap_value(
     baseline_probability = baseline["fraud_probability"]
 
     dead = [name for name, entry in influence.items() if not entry["has_influence"]]
-    assert len(dead) == 16, "ölü feature sayısı değişmiş — metadata ile test ayrışıyor"
+    assert len(dead) == 16, "the number of dead features changed — metadata and test have drifted"
 
     checked = 0
     for name in dead:
@@ -1360,73 +1384,74 @@ def test_dead_features_change_neither_the_score_nor_their_own_shap_value(
         if spec["type"] == "categorical":
             candidates: list[Any] = list(spec["categories"])
         else:
-            # Sayısal alanlarda eğitim aralığının iki ucu: etkisizlik iddiası
-            # uçlarda da geçerli olmalı.
+            # For numeric fields, both ends of the training range: the
+            # no-influence claim must hold at the extremes too.
             candidates = [spec["min"], spec["max"]]
 
         for value in candidates:
             result = bundle.predict({name: value})
             assert result["fraud_probability"] == baseline_probability, (
-                f"'{name}' ölü ilan edilmiş ama değeri {value!r} yapılınca skor değişti"
+                f"'{name}' is declared dead but setting it to {value!r} changed the score"
             )
             contribution = next(
                 item["value"] for item in result["shap_values"] if item["feature"] == name
             )
             assert contribution == 0.0, (
-                f"'{name}' ölü ilan edilmiş ama {value!r} girdisinde SHAP katkısı "
-                f"{contribution!r}"
+                f"'{name}' is declared dead but with input {value!r} its SHAP "
+                f"contribution is {contribution!r}"
             )
             checked += 1
 
-    # Testin gerçekten iş yaptığının kanıtı: 16 feature için çok sayıda değer.
-    assert checked > 40, f"beklenenden az kombinasyon denendi: {checked}"
+    # Proof that the test really did work: many values across 16 features.
+    assert checked > 40, f"fewer combinations were tried than expected: {checked}"
 
-    # Ters yön — canlı bir feature'ı değiştirmek skoru DEĞİŞTİRMELİ, yoksa
-    # yukarıdaki eşitlikler modelin hiçbir şeye tepki vermemesinden ibaret olurdu.
+    # The other direction — changing a live feature MUST change the score,
+    # otherwise the equalities above would just reflect a model that reacts to
+    # nothing.
     moved = bundle.predict({"insured_hobbies": "chess"})["fraud_probability"]
     assert moved != baseline_probability
 
 
 def test_model_info_projection_drops_unknown_nested_keys(bundle: ModelBundle) -> None:
-    """Beyaz liste İÇ İÇE anahtarlarda da sızdırmıyor.
+    """The allowlist does not leak on NESTED keys either.
 
-    NEDEN AYRI BİR TEST GEREKTİ (feature_influence sızıntı testi):
-    Mevcut sızıntı testleri BUGÜN metadata'da var olan üç anahtarı
-    (`preprocessing_contract`, `model_params`, `source_file`) arıyor. Ama beyaz
-    listenin asıl vaadi geleceğe dönük: "yarın train_pipeline.py metadata'ya
-    yeni bir alan eklerse o alan açıkça beyaz listeye alınana kadar dışarı
-    çıkmaz". Bu vaat, bugün var olan anahtarları arayarak test edilemez.
+    WHY A SEPARATE TEST WAS NEEDED (the feature_influence leak test):
+    The existing leak tests look for the three keys that exist in the metadata
+    TODAY (`preprocessing_contract`, `model_params`, `source_file`). But the
+    allowlist's real promise is forward-looking: "if train_pipeline.py adds a new
+    field to the metadata tomorrow, that field does not go out until it is
+    explicitly allowlisted". That promise cannot be tested by searching for keys
+    that already exist.
 
-    Bu yüzden metadata'ya SAHTE alanlar enjekte edip projeksiyonu çalıştırıyoruz.
-    Bir alt modelin `extra="ignore"` ayarı `extra="allow"` yapılırsa ya da
-    `ModelInfoResponse` metadata'yı olduğu gibi yansıtmaya başlarsa burası
-    kırmızıya döner.
+    So we inject FAKE fields into the metadata and run the projection. If a
+    sub-model's `extra="ignore"` is changed to `extra="allow"`, or if
+    `ModelInfoResponse` starts reflecting the metadata as-is, this goes red.
     """
     probe_metadata = copy.deepcopy(bundle.metadata)
 
-    # Beyaz listede OLMAYAN alanlar, üç ayrı iç içe seviyeye serpiştiriliyor.
-    probe_metadata["_internal_note"] = "SIZINTI-KOK"
-    probe_metadata["feature_influence"]["_debug_dump"] = "SIZINTI-INFLUENCE"
-    probe_metadata["feature_influence"]["features"]["age"]["_raw_tree_paths"] = "SIZINTI-ENTRY"
-    probe_metadata["feature_influence"]["summary"]["_internal_rank"] = "SIZINTI-SUMMARY"
-    probe_metadata["fairness"]["_reviewer_private_note"] = "SIZINTI-FAIRNESS"
+    # Fields NOT on the allowlist, scattered across three separate nesting levels.
+    probe_metadata["_internal_note"] = "LEAK-ROOT"
+    probe_metadata["feature_influence"]["_debug_dump"] = "LEAK-INFLUENCE"
+    probe_metadata["feature_influence"]["features"]["age"]["_raw_tree_paths"] = "LEAK-ENTRY"
+    probe_metadata["feature_influence"]["summary"]["_internal_rank"] = "LEAK-SUMMARY"
+    probe_metadata["fairness"]["_reviewer_private_note"] = "LEAK-FAIRNESS"
     probe_metadata["fairness"]["protected_attributes_used_as_features"][0]["_ticket"] = (
-        "SIZINTI-ATTRIBUTE"
+        "LEAK-ATTRIBUTE"
     )
-    probe_metadata["dataset"]["source_file"] = "C:/sunucu/gizli/yol/insurance_claims.csv"
-    probe_metadata["metrics"]["_internal_holdout_auc"] = "SIZINTI-METRIC"
+    probe_metadata["dataset"]["source_file"] = "C:/server/secret/path/insurance_claims.csv"
+    probe_metadata["metrics"]["_internal_holdout_auc"] = "LEAK-METRIC"
 
     probe = ModelBundle(bundle.pipeline, probe_metadata)
     rendered = json.dumps(
         model_info(probe).model_dump(by_alias=True), ensure_ascii=False, default=str
     )
 
-    assert "SIZINTI" not in rendered, "beyaz liste iç içe bir anahtarı sızdırdı"
-    assert "gizli" not in rendered, "sunucu tarafı dosya yolu sızdı"
+    assert "LEAK" not in rendered, "the allowlist leaked a nested key"
+    assert "secret" not in rendered, "a server-side file path leaked"
     assert "source_file" not in rendered
 
-    # Enjeksiyon gerçekten yanıtın DOKUNDUĞU yerlere yapılmış olmalı — aksi
-    # hâlde test hiçbir şey kanıtlamadan yeşil kalırdı.
+    # The injection must genuinely have been made where the response TOUCHES —
+    # otherwise the test would stay green while proving nothing.
     assert "insured_sex" in rendered
     assert "_raw_tree_paths" in json.dumps(probe_metadata["feature_influence"]["features"]["age"])
 
@@ -1434,103 +1459,106 @@ def test_model_info_projection_drops_unknown_nested_keys(bundle: ModelBundle) ->
 def test_model_info_projection_covers_training_ranges_and_defaults(
     bundle: ModelBundle,
 ) -> None:
-    """`training_ranges` ve `defaults` dallarına da canary enjekte edilir.
+    """Canaries are injected into the `training_ranges` and `defaults` branches too.
 
-    Codex C-6: bir üstteki test dört metadata dalını kapsıyordu ama bu ikisini
-    atlıyordu. `TrainingRangeInfo` / `DefaultInfo` bugün `extra="ignore"` — yani
-    kod güvenli. Ancak kapsanmayan bir dal, "beyaz liste her yerde çalışıyor"
-    iddiasını test edilmemiş bırakır: biri `extra="allow"`a dönerse ve metadata
-    ileride oraya hassas bir alan koyarsa testler yeşilken sızıntı olur.
+    Codex C-6: the test above covered four metadata branches but skipped these two.
+    `TrainingRangeInfo` / `DefaultInfo` are `extra="ignore"` today — so the code is
+    safe. But an uncovered branch leaves the claim "the allowlist works
+    everywhere" untested: if one of them ever becomes `extra="allow"` and the
+    metadata later puts a sensitive field there, the leak happens while the tests
+    stay green.
     """
     probe_metadata = copy.deepcopy(bundle.metadata)
 
     a_range = next(iter(probe_metadata["training_ranges"]))
     a_default = next(iter(probe_metadata["defaults"]))
-    probe_metadata["training_ranges"][a_range]["_raw_column_sample"] = "SIZINTI-RANGE"
-    probe_metadata["defaults"][a_default]["_source_row_id"] = "SIZINTI-DEFAULT"
+    probe_metadata["training_ranges"][a_range]["_raw_column_sample"] = "LEAK-RANGE"
+    probe_metadata["defaults"][a_default]["_source_row_id"] = "LEAK-DEFAULT"
 
     probe = ModelBundle(bundle.pipeline, probe_metadata)
     rendered = json.dumps(
         model_info(probe).model_dump(by_alias=True), ensure_ascii=False, default=str
     )
 
-    assert "SIZINTI" not in rendered
-    # Dallar yanıtta gerçekten var — enjeksiyon boşluğa yapılmadı.
+    assert "LEAK" not in rendered
+    # The branches really are in the response — the injection did not go into a void.
     assert a_range in json.loads(rendered)["training_ranges"]
     assert a_default in json.loads(rendered)["defaults"]
 
 
 # --------------------------------------------------------------------------- #
-# 20) Codex ikinci görüşünün açtığı fail-fast boşlukları
+# 21) The fail-fast gaps opened up by the Codex second opinion
 # --------------------------------------------------------------------------- #
 
 
 def test_body_limit_applies_to_endpoints_that_never_read_the_body(
     client: TestClient,
 ) -> None:
-    """Gövdesini okumayan endpoint'lerde de gövde sınırı uygulanmalı (Codex C-1).
+    """The body limit must apply on endpoints that never read the body (Codex C-1).
 
-    BULUNAN AÇIK: sınırın akış bazlı kolu, uygulamanın `receive()` çağırmasına
-    bağlıydı. `/health` ve `/model-info` istek gövdesini hiç okumaz, dolayısıyla
-    `Content-Length` göndermeyen (chunked) bir istemci bu endpoint'lere sınırsız
-    gövde akıtabiliyordu. Ölçüldü: 160 KB chunked gövde ile `GET /health` -> 200.
+    THE GAP FOUND: the streaming arm of the limit depended on the application
+    calling `receive()`. `/health` and `/model-info` never read the request body,
+    so a client that sends no `Content-Length` (chunked) could stream an unbounded
+    body to those endpoints. Measured: `GET /health` with a 160 KB chunked body ->
+    200.
 
-    `Content-Length` VARSA ucuz yol zaten yakalıyordu; açık yalnızca chunked
-    yolundaydı — yani tam olarak başlığı hiç göndermeyen istemcide.
+    When `Content-Length` IS present the cheap path already caught it; the gap was
+    only on the chunked path — that is, exactly with a client that omits the
+    header.
     """
 
     def chunks() -> Any:
         for _ in range(20):
-            yield b"x" * 8192  # toplam 160 KB, Content-Length YOK
+            yield b"x" * 8192  # 160 KB in total, NO Content-Length
 
     for path in ("/health", "/model-info"):
         response = client.request("GET", path, content=chunks())
         assert response.status_code == 413, (
-            f"{path} 160 KB chunked gövdeyi kabul etti ({response.status_code}) — "
-            "gövde sınırı bu endpoint'te uygulanmıyor"
+            f"{path} accepted a 160 KB chunked body ({response.status_code}) — "
+            "the body limit is not applied on this endpoint"
         )
 
-    # Normal istekler etkilenmemeli: gövdesiz GET hâlâ çalışıyor.
+    # Normal requests must be unaffected: a bodyless GET still works.
     assert client.get("/health").status_code == 200
     assert client.get("/model-info").status_code == 200
 
 
 def test_display_names_out_of_order_fails_fast(bundle: ModelBundle) -> None:
-    """`transformed_display_names` PERMÜTE edilirse uygulama açılmamalı (Codex C-3).
+    """If `transformed_display_names` is PERMUTED, the application must not start (Codex C-3).
 
-    BULUNAN AÇIK: `_verify_feature_alignment` yalnızca uzunluğa ve `cat__` /
-    `remainder__` önekine bakıyordu; ikisi de adların SIRASI hakkında hiçbir şey
-    söylemez. Aynı adları farklı sırada içeren bir metadata ile servis sorunsuz
-    açılıyor, skorlar doğru kalıyor, ama `/predict` her SHAP katkısını YANLIŞ
-    feature'a atfediyordu.
+    THE GAP FOUND: `_verify_feature_alignment` only looked at the length and the
+    `cat__` / `remainder__` prefix; neither says anything about the ORDER of the
+    names. With metadata containing the same names in a different order the service
+    started cleanly and the scores stayed correct, but `/predict` attributed every
+    SHAP contribution to the WRONG feature.
 
-    `_verify_shap_additivity` bunu yakalayamaz — toplam değişmediği için eşitlik
-    korunur. Testler yakalıyordu, açılış yakalamıyordu; yani bozuk bir artefaktla
-    production'a çıkmak mümkündü. Bu, demonun tam da satmaya çalıştığı şeyin
-    (açıklanabilirlik) sessizce yalan söylemesi olurdu.
+    `_verify_shap_additivity` cannot catch this — the sum is unchanged, so the
+    identity holds. The tests caught it, startup did not; a broken artifact could
+    therefore reach production. That would be the very thing this demo is selling
+    (explainability) lying silently.
     """
     broken = copy.deepcopy(bundle.metadata)
     names = broken["feature_list"]["transformed_display_names"]
-    names[0], names[1] = names[1], names[0]  # sadece SIRA bozuluyor
+    names[0], names[1] = names[1], names[0]  # only the ORDER is broken
 
     probe = ModelBundle(bundle.pipeline, broken)
-    with pytest.raises(ArtifactError, match="kolon sırasıyla eşleşmiyor"):
+    with pytest.raises(ArtifactError, match="column order"):
         probe._verify_feature_alignment()
 
-    # Sağlamlık: bozulmamış metadata aynı kontrolden geçmeli.
+    # Robustness: intact metadata must pass the same check.
     ModelBundle(bundle.pipeline, copy.deepcopy(bundle.metadata))._verify_feature_alignment()
 
 
 def test_missing_positive_class_fails_fast_instead_of_guessing(
     bundle: ModelBundle,
 ) -> None:
-    """`classes_` içinde pozitif etiket yoksa tahmin edilmemeli (Codex C-2).
+    """If the positive label is missing from `classes_`, it must not be guessed (Codex C-2).
 
-    BULUNAN AÇIK: eski kod etiketi bulamayınca "son sınıf"a düşüyordu. Bu
-    varsayım yanlış olduğunda hem `predict_proba` sütunu hem SHAP ekseni AYNI
-    ANDA kayar — dolayısıyla `_verify_shap_additivity` de aynı yanlış ekseni
-    kullanır ve eşitliği sağlar. Yani hata kendi doğrulamasını atlatıp "ters
-    işaretli ama tutarlı" bir servis açardı.
+    THE GAP FOUND: the old code fell back to "the last class" when it could not
+    find the label. When that assumption is wrong, both the `predict_proba` column
+    and the SHAP axis shift AT THE SAME TIME — so `_verify_shap_additivity` uses
+    the same wrong axis and the identity holds. The bug would slip past its own
+    verification and bring up a service that was "sign-flipped but self-consistent".
     """
 
     class _WrongLabels:
@@ -1539,11 +1567,12 @@ def test_missing_positive_class_fails_fast_instead_of_guessing(
     class _NoLabels:
         pass
 
-    with pytest.raises(ArtifactError, match="pozitif sınıf"):
+    with pytest.raises(ArtifactError, match="positive class"):
         _positive_class_index(_WrongLabels())
 
     with pytest.raises(ArtifactError, match="classes_"):
         _positive_class_index(_NoLabels())
 
-    # Gerçek artefakt etkilenmemeli: pozitif sınıf 1, indeksi de doğru bulunuyor.
+    # The real artifact must be unaffected: the positive class is 1 and its index
+    # is found correctly.
     assert _positive_class_index(bundle.pipeline.named_steps["model"]) == 1

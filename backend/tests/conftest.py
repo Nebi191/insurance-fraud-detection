@@ -1,13 +1,13 @@
-"""Ortak test fixture'ları.
+"""Shared test fixtures.
 
-`client` fixture'ı `TestClient`'ı CONTEXT MANAGER olarak kullanır — bu şart:
-Starlette `lifespan`'i yalnızca `with` bloğunda çalıştırır. Doğrudan
-`TestClient(app)` yazsaydık `app.state.bundle` hiç kurulmaz ve her istek
-AttributeError ile 500 dönerdi. Yani bu fixture aynı zamanda "artefakt gerçekten
-yükleniyor mu?" sorusunun ilk cevabıdır.
+The `client` fixture uses `TestClient` as a CONTEXT MANAGER, which is mandatory:
+Starlette only runs `lifespan` inside a `with` block. Had we written
+`TestClient(app)` directly, `app.state.bundle` would never be set up and every
+request would return a 500 with an AttributeError. So this fixture is also the
+first answer to "does the artifact really load?".
 
-Scope `session`: pipeline.pkl + SHAP TreeExplainer yüklemesi pahalıdır, test
-başına tekrarlamanın anlamı yok.
+Scope `session`: loading pipeline.pkl + the SHAP TreeExplainer is expensive and
+there is no point repeating it per test.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ def client() -> Any:
 
 @pytest.fixture(scope="session")
 def bundle(client: TestClient) -> ModelBundle:
-    """Uygulamanın lifespan sırasında yüklediği artefaktın ta kendisi.
+    """The very artifact the application loaded during lifespan.
 
-    Ayrı bir `ModelBundle.load()` çağırmıyoruz: testin doğruladığı nesne,
-    isteklerin kullandığı nesneyle AYNI olmalı.
+    We do not call a separate `ModelBundle.load()`: the object the test verifies
+    must be the SAME object the requests use.
     """
     return client.app.state.bundle
 

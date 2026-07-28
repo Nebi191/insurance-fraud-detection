@@ -1,17 +1,17 @@
 /**
- * Talep formu — 34 alan, hepsi opsiyonel.
+ * The claim form — 34 fields, every one of them optional.
  *
- * DÜZEN KARARI
- * ------------
- * Skoru fiilen sürükleyen altı alan AÇIK bir grupta, kalanlar katlanmış
- * gruplarda. Hiçbir alan gizlenmiyor — grup başlıkları kaç alan içerdiğini ve
- * kaçının modelce kullanılmadığını da yazıyor, çünkü "Olay (11 alan, 9'u
- * kullanılmıyor)" başlığı tek başına bir bulgu.
+ * LAYOUT DECISION
+ * ---------------
+ * The six fields that actually move the score sit in an EXPANDED group; the rest
+ * are collapsed. No field is hidden — the group headers also state how many
+ * fields they hold and how many of those the model ignores, because
+ * "Incident (11 fields, 9 unused)" is a finding in its own right.
  *
- * BOŞ ALAN = GÖNDERİLMEZ
- * `buildPayload` yalnızca doldurulmuş alanları paketler. Backend kalanları
- * eğitim medyanı/moduyla doldurur ve guardrail SADECE gönderilen alanları
- * kontrol eder — boş bir formun 34 uyarı basmamasının sebebi bu.
+ * BLANK MEANS NOT SENT
+ * `buildPayload` only packs fields that were filled in. The backend fills the
+ * rest with the training median/mode, and the guardrail only checks fields that
+ * were actually SENT — that is why an empty form does not produce 34 warnings.
  */
 
 import { useState } from "react";
@@ -26,13 +26,13 @@ export function buildPayload(values: FormValues, info: ModelInfoResponse): Predi
   const payload: PredictRequest = {};
   for (const [name, raw] of Object.entries(values)) {
     const value = raw.trim();
-    if (value === "") continue; // boş = gönderme, varsayılan kullanılsın
+    if (value === "") continue; // blank = don't send, let the default apply
 
     if (info.training_ranges[name]?.type === "numeric") {
       const parsed = Number(value);
-      // NaN'ı göndermiyoruz: backend 422 döndürürdü ve kullanıcı hatayı
-      // anlamsız bir sunucu mesajından öğrenirdi. Sayı kutusu zaten harf
-      // kabul etmiyor; bu ikinci bir emniyet.
+      // We never send NaN: the backend would return a 422 and the user would
+      // learn about the mistake from an opaque server message. The number input
+      // already rejects letters; this is a second safety net.
       if (Number.isFinite(parsed)) payload[name] = parsed;
     } else {
       payload[name] = value;
@@ -75,16 +75,15 @@ export function ClaimForm({
       <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
         <p>
           <strong className="font-semibold text-slate-800 dark:text-slate-100">
-            Bütün alanlar isteğe bağlı.
+            Every field is optional.
           </strong>{" "}
-          Boş bıraktıklarınız eğitim verisinin medyan/mod değerleriyle doldurulur —
-          hiçbir şey doldurmadan da skor alabilirsiniz.
+          Anything you leave blank is filled in with the median/mode of the training
+          data — you can get a score without entering anything at all.
         </p>
         <p className="mt-2">
           <span className="font-medium">{info.feature_influence.summary.n_without_influence}</span>{" "}
-          alan <em>model kullanmıyor</em> rozetiyle işaretli: bu eğitilmiş modelin
-          ağaçları o kolonlarda hiç dallanmıyor, dolayısıyla değerleri skoru
-          etkilemiyor.
+          fields carry an <em>unused by model</em> badge: this trained model's trees
+          never branch on those columns, so their values cannot affect the score.
         </p>
       </div>
 
@@ -107,19 +106,19 @@ export function ClaimForm({
           disabled={submitting}
           className="rounded-lg bg-sky-700 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-sky-600 dark:hover:bg-sky-500"
         >
-          {submitting ? "Skorlanıyor…" : "Skorla"}
+          {submitting ? "Scoring…" : "Score claim"}
         </button>
         <button
           type="button"
           onClick={onReset}
           className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
         >
-          Formu temizle
+          Clear form
         </button>
         <span className="text-xs text-slate-500 dark:text-slate-400">
           {filledCount === 0
-            ? "Hiçbir alan doldurulmadı — hepsi varsayılanla gidecek."
-            : `${filledCount} alan dolduruldu, kalan ${34 - filledCount} alan varsayılanla gidecek.`}
+            ? "No fields filled in — all 34 will use their defaults."
+            : `${filledCount} filled in, the remaining ${34 - filledCount} will use their defaults.`}
         </span>
       </div>
     </form>
@@ -173,18 +172,18 @@ function FieldGroupSection({
               {group.title}
             </span>
             <span className="block text-xs text-slate-500 dark:text-slate-400">
-              {group.fields.length} alan
-              {deadCount > 0 && `, ${deadCount}'i model tarafından kullanılmıyor`}
+              {group.fields.length} {group.fields.length === 1 ? "field" : "fields"}
+              {deadCount > 0 && `, ${deadCount} unused by the model`}
             </span>
           </span>
           {errorCount > 0 && (
             <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700 dark:bg-red-950 dark:text-red-300">
-              {errorCount} hata
+              {errorCount} {errorCount === 1 ? "error" : "errors"}
             </span>
           )}
           {oodCount > 0 && (
             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-              {oodCount} dağılım dışı
+              {oodCount} out of range
             </span>
           )}
         </button>
@@ -198,8 +197,8 @@ function FieldGroupSection({
               const range = info.training_ranges[field.name];
               const fallback = info.defaults[field.name];
               const influence = info.feature_influence.features[field.name];
-              // Sözleşme uyumu açılışta doğrulanıyor; yine de tip düzeyinde
-              // güvenli davranıp eksik alanı sessizce atlamıyoruz.
+              // Contract coverage is verified at startup; even so we stay
+              // type-safe here rather than silently skipping a missing field.
               if (!range || !fallback || !influence) return null;
 
               return (

@@ -1,12 +1,12 @@
 /**
- * Uygulama kabuğu: model bilgisini bir kez yükler, iki sayfayı yönlendirir.
+ * Application shell: loads the model info once, routes between the two pages.
  *
- * `/model-info` UYGULAMA AÇILIŞINDA ÇEKİLİR
- * -----------------------------------------
- * Form, seçenek listelerini ve aralıkları bu yanıttan kurduğu için o gelmeden
- * ekranda anlamlı bir şey gösteremeyiz. Beklerken iskelet, başarısız olursa
- * NEDENİ ile birlikte hata ekranı gösteriyoruz — "bir şeyler ters gitti"
- * demek, backend'i unutmuş bir geliştiriciye hiçbir şey söylemez.
+ * `/model-info` IS FETCHED AT STARTUP
+ * -----------------------------------
+ * The form builds its option lists and ranges from that response, so there is
+ * nothing meaningful to render until it arrives. While waiting we show a
+ * skeleton; on failure we show the REASON alongside the error — "something went
+ * wrong" tells a developer who forgot to start the backend absolutely nothing.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -33,9 +33,9 @@ export default function App() {
     setState({ status: "loading" });
     try {
       const info = await fetchModelInfo();
-      // Elle yazılmış alan listesi artefaktla uyuşmuyorsa SESSİZ kalmıyoruz:
-      // eksik alan kullanıcının hiç göremediği bir girdi, fazla alan ise
-      // `extra="forbid"` yüzünden her isteğin 422 alması demek.
+      // If the hand-written field list disagrees with the artifact we do NOT stay
+      // quiet: a missing field is an input the user can never see, and an extra
+      // field means every request gets a 422 because of `extra="forbid"`.
       assertFieldsCoverContract(info.feature_list.pipeline_input_order);
       setState({ status: "ready", info });
     } catch (error) {
@@ -44,7 +44,7 @@ export default function App() {
         message:
           error instanceof ApiError || error instanceof Error
             ? error.message
-            : "Model bilgisi yüklenemedi.",
+            : "Could not load the model info.",
       });
     }
   }, []);
@@ -59,19 +59,19 @@ export default function App() {
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4 px-4 py-3">
           <div className="mr-auto min-w-0">
             <p className="truncate text-sm font-semibold text-slate-900 dark:text-slate-50">
-              Sigorta Talebi Dolandırıcılık Skorlaması
+              Insurance Claim Fraud Scoring
             </p>
             <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-              LightGBM + SHAP · açıklamalı, dağılım dışı girdi uyarılı
+              LightGBM + SHAP · explained per claim, with out-of-distribution warnings
             </p>
           </div>
 
-          <nav className="flex items-center gap-1" aria-label="Ana gezinme">
+          <nav className="flex items-center gap-1" aria-label="Main navigation">
             <NavLink current={route} target="score" navigate={navigate}>
-              Skorlama
+              Score a claim
             </NavLink>
             <NavLink current={route} target="model-card" navigate={navigate}>
-              Model kartı
+              Model card
             </NavLink>
           </nav>
 
@@ -92,12 +92,12 @@ export default function App() {
 
       <footer className="mx-auto max-w-7xl px-4 py-6 text-xs text-slate-400 dark:text-slate-500">
         <p>
-          Bu bir demodur. Model kararları tek başına bir talebi reddetmek için
-          değil, insan incelemesini önceliklendirmek için kullanılmalıdır.
+          This is a demo. Model output should be used to prioritise human review,
+          never to decline a claim on its own.
         </p>
         {state.status === "ready" && (
           <p className="mt-1">
-            Model sürümü {state.info.model_version} · API: {API_BASE_URL}
+            Model version {state.info.model_version} · API: {API_BASE_URL}
           </p>
         )}
       </footer>
@@ -135,7 +135,7 @@ function NavLink({
 function LoadingState() {
   return (
     <div className="flex flex-col gap-4" aria-busy="true" aria-live="polite">
-      <p className="text-sm text-slate-500 dark:text-slate-400">Model bilgisi yükleniyor…</p>
+      <p className="text-sm text-slate-500 dark:text-slate-400">Loading model info…</p>
       <div className="h-32 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-800" />
       <div className="h-64 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-800" />
     </div>
@@ -149,11 +149,11 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
       className="rounded-xl border border-red-300 bg-red-50 p-5 dark:border-red-900 dark:bg-red-950/40"
     >
       <h2 className="text-sm font-semibold text-red-900 dark:text-red-200">
-        Model bilgisi yüklenemedi
+        Could not load the model info
       </h2>
       <p className="mt-2 text-sm leading-relaxed text-red-800 dark:text-red-300">{message}</p>
       <div className="mt-3 rounded-lg border border-red-200 bg-white/60 p-3 text-xs text-red-900 dark:border-red-900 dark:bg-slate-900/60 dark:text-red-200">
-        <p className="font-medium">Yerelde çalıştırıyorsanız:</p>
+        <p className="font-medium">If you are running this locally:</p>
         <pre className="mt-1 overflow-x-auto font-mono text-[11px]">
           cd backend{"\n"}python -m uvicorn app.main:app --port 8000
         </pre>
@@ -163,7 +163,7 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
         onClick={onRetry}
         className="mt-3 rounded-lg bg-red-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-800"
       >
-        Tekrar dene
+        Try again
       </button>
     </div>
   );

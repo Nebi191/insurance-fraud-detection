@@ -1,12 +1,12 @@
-"""Backend test paketi.
+"""Backend test package.
 
-Bu `__init__.py` boş görünüyor ama İŞLEVSELDİR, silinmemeli.
+This `__init__.py` looks empty but it is FUNCTIONAL and must not be deleted.
 
-pytest'in varsayılan (`prepend`) import modunda, bir test dosyasının paket
-kökü `__init__.py` zinciri yukarı takip edilerek bulunur ve o kökün ÜST dizini
-`sys.path`'e eklenir. `backend/tests/__init__.py` var olduğu için `backend/`
-dizini `sys.path`'e girer ve testler `from app.main import app` diyebilir.
+In pytest's default (`prepend`) import mode, a test file's package root is found
+by walking the `__init__.py` chain upwards, and the PARENT directory of that root
+is added to `sys.path`. Because `backend/tests/__init__.py` exists, the `backend/`
+directory ends up on `sys.path` and the tests can say `from app.main import app`.
 
-Alternatifi `conftest.py` içinde elle `sys.path` oynamaktı; bu yol daha az
-sihirli ve pytest'in kendi kuralına dayanıyor.
+The alternative was manipulating `sys.path` by hand in `conftest.py`; this route
+is less magical and relies on pytest's own rule.
 """

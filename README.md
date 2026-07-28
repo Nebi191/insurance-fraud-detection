@@ -1,14 +1,19 @@
 # 🛡️ Insurance Fraud Detection
 
-> End-to-end ML pipeline for detecting fraudulent insurance claims using LightGBM, SHAP explainability, and a Streamlit web application.
+> Production-shaped ML service for scoring insurance claims: LightGBM behind a
+> FastAPI API, with per-prediction SHAP explanations served as raw JSON and
+> out-of-distribution input warnings.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue) ![LightGBM](https://img.shields.io/badge/LightGBM-4.x-green) ![Streamlit](https://img.shields.io/badge/Streamlit-1.x-red) ![SHAP](https://img.shields.io/badge/SHAP-Explainable_AI-orange)
+![Python](https://img.shields.io/badge/Python-3.14-blue) ![LightGBM](https://img.shields.io/badge/LightGBM-4.6-green) ![FastAPI](https://img.shields.io/badge/FastAPI-0.139-009688) ![React](https://img.shields.io/badge/React-19-61dafb) ![SHAP](https://img.shields.io/badge/SHAP-Explainable_AI-orange)
 
 ---
 
 ## 📌 Problem Statement
 
-Insurance fraud costs the industry billions of dollars annually. This project builds a binary classification pipeline to detect fraudulent claims from structured policy and incident data. The model prioritizes **recall over precision** — missing a fraud case is far more costly than a false alarm.
+Insurance fraud costs the industry billions of dollars annually. This project
+builds a binary classification pipeline to detect fraudulent claims from
+structured policy and incident data. The model prioritizes **recall over
+precision** — missing a fraud case is far more costly than a false alarm.
 
 ---
 
@@ -23,14 +28,17 @@ Insurance fraud costs the industry billions of dollars annually. This project bu
 
 ## 🔬 Approach
 
-### Notebook 1 — EDA
+The `notebooks/` directory is the exploration record. The shipped artifact is
+produced by `backend/train_pipeline.py`, not by the notebooks.
+
+### `01.EDA.ipynb` — Exploratory analysis
 - Target distribution analysis
 - Detection of hidden missing values (`"?"` strings in 3 columns)
 - Fraud rate by categorical features (incident severity: Major Damage → 60% fraud rate)
 - Correlation analysis with `fraud_reported`
 
-### Notebook 2 — Preprocessing & Feature Engineering
-- Dropped irrelevant columns (policy number, zip code, location)
+### `02_preprocessing_fe.ipynb` — Preprocessing
+- Dropped irrelevant and PII columns (policy number, zip code, location)
 - Normalized hidden missing values (`"?"` → `NaN`) in 3 columns
 - Derived `incident_year` / `policy_bind_year` from the raw date columns
 - Built sklearn `Pipeline` with `ColumnTransformer` (OrdinalEncoder + SimpleImputer)
@@ -43,13 +51,16 @@ Insurance fraud costs the industry billions of dollars annually. This project bu
 > `backend/train_pipeline.py` faithfully reproduces the model **as it was
 > actually trained**, so those features are absent there too.
 
-### Notebook 3 — Modeling
-- Baseline: LightGBM and XGBoost with `scale_pos_weight`
+### `03_lightgbm.ipynb` — Modeling
+- Baseline: LightGBM with `scale_pos_weight`
 - Hyperparameter optimization: Optuna TPE (150 trials, StratifiedKFold CV)
 - Metric: **PR-AUC** (preferred over ROC-AUC for imbalanced datasets)
 - Overfitting analysis: Train vs Test PR-AUC comparison
 
-### Notebook 4 — SHAP Analysis
+### `04_xgboost.ipynb` — Comparison
+- XGBoost with GridSearch, evaluated against the LightGBM baseline
+
+### `05_SHAP.ipynb` — SHAP analysis
 - Global feature importance (summary/beeswarm plot)
 - Local explanation (waterfall plot per prediction)
 - Key insight: `incident_severity` dominates predictions (+1.83 SHAP value for Major Damage)
@@ -67,24 +78,48 @@ Insurance fraud costs the industry billions of dollars annually. This project bu
 - `n_estimators=173`, `learning_rate=0.0106`, `num_leaves=37`, `min_child_samples=93`
 - Train PR-AUC: 0.789 / Test PR-AUC: 0.652 (gap: 0.137)
 
+> **The probabilities are not calibrated.** The model was trained with
+> `scale_pos_weight ≈ 3.04`, which systematically inflates the minority class's
+> probabilities. `fraud_probability` is a **ranking score** for prioritising
+> claims, not an absolute probability. The API states this on every response
+> path (`GET /model-info → probability_calibration`).
+
 ---
 
-## 🚀 Application
+## 🚀 Service
 
-The original Streamlit prototype (`app.py`) has been **removed**. It loaded
-three separate artifacts (`best_model_lgb.pkl`, `preprocessor.pkl`,
-`defaults.pkl`) that no longer exist — those were consolidated into a single
+The original Streamlit prototype (`app.py`) has been **removed**. It loaded three
+separate artifacts (`best_model_lgb.pkl`, `preprocessor.pkl`, `defaults.pkl`)
+that no longer exist — those were consolidated into a single
 `backend/models/pipeline.pkl`. It remains in the git history.
 
-It is being replaced by a FastAPI backend + React frontend (work in progress):
+**Backend — FastAPI**
 
-- `backend/train_pipeline.py` — trains and packages preprocessor + model as one
-  sklearn `Pipeline`, plus `models/metadata.json` (metrics, defaults, training
-  ranges, preprocessing contract, fairness declaration)
-- `backend/app/` — FastAPI service (`/predict`, `/health`, `/model-info`)
-- `frontend/` — React + Vite + TypeScript UI with interactive SHAP charts
+| Endpoint | Purpose |
+|---|---|
+| `POST /predict` | Scores one claim. Returns the probability, a risk label, all 34 SHAP contributions as raw JSON, and out-of-distribution warnings. Every field is optional; anything omitted is filled with the training median/mode. |
+| `GET /model-info` | Model card data: metrics, dataset split, training ranges, defaults, measured feature influence, fairness declaration, library versions. |
+| `GET /health` | Healthcheck, including the loaded model version. |
 
-This section will be rewritten once the service is deployed.
+Design decisions worth calling out:
+
+- **One pipeline, no manual encoding.** Imputation and encoding live inside
+  `pipeline.pkl`; the API layer only performs schema normalisation.
+- **Fail-fast at startup.** The app verifies the preprocessing contract, feature
+  alignment, transform equivalence and SHAP additivity before serving. A service
+  that is up but wrong is worse than one that refuses to start.
+- **SHAP as JSON, not PNG.** The chart is drawn in the browser, so it stays
+  interactive and the server carries no plotting stack.
+- **Guardrails.** Values outside the training range are flagged rather than
+  silently extrapolated — tree models cannot reach past their training range.
+- **Measured, not declared.** The UI badge marking the 16 features the model
+  never splits on is derived from the booster, served through the API, and never
+  hard-coded in the frontend.
+
+**Frontend — React + Vite + TypeScript + Tailwind**, with the SHAP chart rendered
+via recharts and a model card page fed entirely from `/model-info`.
+
+Deployment (Hugging Face Spaces + Netlify) is the remaining phase.
 
 ---
 
@@ -92,24 +127,41 @@ This section will be rewritten once the service is deployed.
 
 ```bash
 # 1. Clone the repository
-git https://github.com/Nebi191/insurance-fraud-detection.git
+git clone https://github.com/Nebi191/insurance-fraud-detection.git
 cd insurance-fraud-detection
+```
 
-# 2. Install the exploration dependencies
-pip install -r notebooks/requirements.txt
+**Backend** (the dataset is already in the repo at `data/insurance_claims.csv`):
 
-# 3. The dataset is already in the repo
-# data/insurance_claims.csv
+```bash
+pip install -r backend/requirements.txt
 
-# 4. Run notebooks in order
-# NB1_EDA.ipynb
-# NB2_Preprocessing.ipynb
-# NB3_Modeling.ipynb
-# NB4_SHAP.ipynb
-
-# 5. Reproduce the packaged model artifact
-#    (uses its own pinned deps: backend/requirements.txt)
+# Optional — reproduce the packaged artifact from the CSV.
+# Deterministic: the same input yields a bit-identical pipeline.pkl.
 python backend/train_pipeline.py
+
+cd backend
+python -m uvicorn app.main:app --port 8000
+# Interactive API docs: http://127.0.0.1:8000/docs
+python -m pytest              # 128 tests
+```
+
+**Frontend:**
+
+```bash
+cd frontend
+npm install
+npm run dev                   # http://localhost:5173
+```
+
+The frontend defaults to `http://127.0.0.1:8000`; override it with `VITE_API_URL`.
+The backend only accepts the origins listed in `ALLOWED_ORIGINS` (comma
+separated, no wildcards — it refuses to start on `*`).
+
+**Notebooks** (exploration only, loose dependency ranges):
+
+```bash
+pip install -r notebooks/requirements.txt
 ```
 
 ---
@@ -121,12 +173,15 @@ python backend/train_pipeline.py
 | pandas, numpy | Data manipulation |
 | scikit-learn | Pipeline, preprocessing, evaluation |
 | LightGBM | Gradient boosting classifier |
-| XGBoost | Gradient boosting (comparison) |
-| Optuna | Bayesian hyperparameter optimization |
+| XGBoost | Gradient boosting (comparison, notebooks only) |
+| Optuna | Bayesian hyperparameter optimization (notebooks only) |
 | SHAP | Model explainability |
-| Streamlit | Web application |
+| FastAPI, Pydantic v2 | API layer and request validation |
+| React, Vite, TypeScript, Tailwind | Frontend |
+| recharts | Interactive SHAP chart |
 | joblib | Model serialization |
-| matplotlib, seaborn | Visualization |
+| pytest | Backend test suite |
+| matplotlib, seaborn | Visualization (notebooks only) |
 
 ---
 
@@ -135,18 +190,43 @@ python backend/train_pipeline.py
 ```
 insurance-fraud-detection/
 │
-├── NB1_EDA.ipynb
-├── NB2_Preprocessing.ipynb
-├── NB3_Modeling.ipynb
-├── NB4_SHAP.ipynb
-├── app.py
-├── requirements.txt
-├── README.md
-└── .gitignore
+├── backend/
+│   ├── app/
+│   │   ├── main.py           # FastAPI app, endpoints, CORS, body-size limit
+│   │   ├── schemas.py        # Pydantic request/response contract
+│   │   ├── model.py          # artifact loading, prediction, SHAP
+│   │   └── guardrails.py     # out-of-distribution detection
+│   ├── models/
+│   │   ├── pipeline.pkl      # preprocessor + model, one file
+│   │   └── metadata.json     # metrics, defaults, training ranges, fairness
+│   ├── tests/
+│   ├── train_pipeline.py     # produces both artifacts
+│   └── requirements.txt
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/       # form, SHAP chart, result card
+│   │   ├── pages/            # scoring page, model card page
+│   │   └── api.ts, types.ts, fields.ts
+│   └── package.json
+│
+├── notebooks/                # 01-05, exploration record
+├── data/insurance_claims.csv
+├── review_log/               # code review reports
+└── README.md
 ```
+
+---
+
+## ⚠️ Intended Use
+
+This is a portfolio demo. The model uses protected attributes (sex, age, marital
+status) as features and **no fairness audit has been performed** — the model card
+page states this openly rather than hiding it. Model output should be used to
+prioritise human review, never to decline a claim on its own.
 
 ---
 
 ## 👤 Author
 
-**Nebi** — Aspiring ML Engineer | [GitHub](https://github.com/Nebi191)
+**Nebi** — ML Engineer | [GitHub](https://github.com/Nebi191)

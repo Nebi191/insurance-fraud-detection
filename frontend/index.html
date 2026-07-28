@@ -1,16 +1,22 @@
 <!doctype html>
-<html lang="tr">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Sigorta Talebi Dolandırıcılık Skorlaması</title>
+    <!--
+      Declaring an icon stops the browser from probing /favicon.ico and logging a
+      404 on every page load. SVG keeps it crisp at any size and needs no binary
+      asset in the repo.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Insurance Claim Fraud Scoring</title>
     <meta
       name="description"
-      content="LightGBM tabanlı sigorta talebi dolandırıcılık skorlaması — SHAP açıklamalı, dağılım dışı girdi uyarılı."
+      content="LightGBM insurance claim fraud scoring with per-prediction SHAP explanations and out-of-distribution input warnings."
     />
     <script>
-      // Tema, React yüklenmeden ÖNCE uygulanır. Aksi hâlde koyu tema seçili bir
-      // kullanıcı ilk boyamada beyaz bir flaş görür (FOUC).
+      // The theme is applied BEFORE React loads. Otherwise a user on the dark
+      // theme sees a white flash on first paint (FOUC).
       (() => {
         const saved = localStorage.getItem("theme");
         const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;

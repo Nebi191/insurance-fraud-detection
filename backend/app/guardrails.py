@@ -1,62 +1,64 @@
-"""Out-of-distribution (OOD) tespiti — "model bu değeri eğitimde gördü mü?".
+"""Out-of-distribution (OOD) detection — "did the model see this value in training?".
 
-NE YAPAR, NEDEN BÖYLE YAPAR
----------------------------
+WHAT IT DOES, AND WHY IT DOES IT THIS WAY
+-----------------------------------------
 
-1) NEDEN VAR
-   `predict_proba` her girdi için bir sayı döndürür. Girdi eğitim verisinin
-   hiç uzanmadığı bir bölgedeyse de döndürür — "bu bana yabancı" diye bir
-   çıktısı YOKTUR. Skor 0.71 gelir, `risk_level` "high" yazar, SHAP grafiği
-   çizilir; her şey normal görünür ama o 0.71'in arkasında hiçbir gözlem
-   yoktur.
+1) WHY IT EXISTS
+   `predict_proba` returns a number for every input. It returns one even when the
+   input sits in a region the training data never reached — there is NO output
+   that means "this is unfamiliar to me". A score of 0.71 comes back,
+   `risk_level` says "high", the SHAP chart renders; everything looks normal, but
+   there is not a single observation behind that 0.71.
 
-   Ağaç modellerinde bu özellikle sinsidir. LightGBM `auto_year <= 2012.5`
-   gibi eşiklerle bölünür ve eğitimde 2015'ten büyük değer olmadığı için
-   HİÇBİR eşik 2015'in üstünde olamaz. Sonuç: 2016 model araç ile 2050 model
-   araç aynı yaprağa düşer, aynı katkıyı alır. Model "çok yeni araç" ayrımını
-   yapamaz ama yaptığını sanırsınız.
+   With tree models this is especially insidious. LightGBM splits on thresholds
+   like `auto_year <= 2012.5`, and since no training row exceeds 2015, NO
+   threshold can sit above 2015. The result: a 2016 vehicle and a 2050 vehicle
+   land in the same leaf and receive the same contribution. The model cannot tell
+   "very new vehicle" apart — but you would think it could.
 
-   Bu modül o sessizliği sese çevirir. Tahmini ENGELLEMEZ — skor yine döner,
-   yanına "şu alanları daha önce hiç görmedim" notu eklenir. Sigorta eksperi
-   için bu kritik bir fark: reddedilen bir talep ile modelin emin olmadığı bir
-   talep aynı şey değildir.
+   This module turns that silence into a signal. It never BLOCKS the prediction —
+   the score is still returned, with a note saying "I have never seen these
+   fields before". For an insurance adjuster that is a critical distinction: a
+   rejected claim and a claim the model is unsure about are not the same thing.
 
-2) YALNIZCA SAYISAL ALANLAR — VE BU BİR EKSİKLİK DEĞİL
-   Kategorik alanlar `schemas.py`'da `Literal` ile eğitimde görülen değerlere
-   kapalıdır: geçersiz bir kategori guardrail'e HİÇ ULAŞMADAN 422 alır. Yani
-   kategorik OOD kontrolü yazsaydık ÖLÜ KOD olurdu — API üzerinden asla
-   tetiklenemeyen, dolayısıyla gerçekten test edilemeyen bir dal.
+2) NUMERIC FIELDS ONLY — AND THAT IS NOT A GAP
+   Categorical fields are closed to the values seen in training via `Literal` in
+   `schemas.py`: an invalid category gets a 422 and NEVER REACHES the guardrail.
+   So a categorical OOD check would be DEAD CODE — a branch that can never be
+   triggered through the API and therefore can never genuinely be tested.
 
-   Bu bilinçli bir tasarım: `OrdinalEncoder` `unknown_value=-1` ile kurulu,
-   bilinmeyen kategoriyi sessizce -1'e kodlayıp anlamsız ama "başarılı"
-   görünen bir tahmin üretirdi. 422 dönmek daha güvenli. Ama sınırın kendisi
-   saklanmamalı: `/predict` yanıtındaki alan açıklaması ve model card bunu
-   açıkça söyler.
+   This is a deliberate design: `OrdinalEncoder` is configured with
+   `unknown_value=-1`, so it would silently encode an unknown category as -1 and
+   produce a meaningless but "successful"-looking prediction. Returning a 422 is
+   safer. But the boundary itself must not be hidden: the field description on
+   the `/predict` response and the model card both state it plainly.
 
-3) YALNIZCA GÖNDERİLEN ALANLAR KONTROL EDİLİR
-   Verilmeyen alanlar `metadata.defaults`'taki medyan/mod ile doldurulur ve o
-   değerler TANIM GEREĞİ eğitim aralığının içindedir. Doldurulmuş bir alan için
-   uyarı üretmek, kullanıcının hiç dokunmadığı bir alanı sorunluymuş gibi
-   göstermek olurdu — üstelik her boş istek 34 uyarı basardı.
+3) ONLY FIELDS THAT WERE ACTUALLY SENT ARE CHECKED
+   Fields that were not supplied get filled from `metadata.defaults` (median or
+   mode), and those values are BY DEFINITION inside the training range. Emitting
+   a warning for a filled field would mark something the user never touched as
+   problematic — and every empty request would print 34 warnings.
 
-   Ayrım `None` üzerinden yapılır: alan hiç gönderilmedi ya da açıkça `null`
-   gönderildi -> kontrol yok. Bu, `prepare_row()`'un varsayılan doldurma
-   kuralıyla birebir aynı ayrımdır (bkz. `model.py` K3/K4).
+   The distinction is made on `None`: the field was never sent, or was explicitly
+   sent as `null` -> no check. That is exactly the same distinction
+   `prepare_row()` uses for default filling (see `model.py` K3/K4).
 
-4) SIRALAMA ANLAMLIDIR: ÖNCE MODELİN GERÇEKTEN BAKTIĞI ALANLAR
-   Bu modelin 34 feature'ından 16'sının split sayısı sıfırdır — model onlara
-   hiç bakmaz, SHAP katkıları tam 0.0'dır. `umbrella_limit` (ölü) için aralık
-   dışı bir değer geldiğinde skor GERÇEKTEN etkilenmez; `age` (canlı) için
-   geldiğinde etkilenir. İkisini aynı sırada listelemek, okuyucuyu ikisinin
-   aynı ağırlıkta olduğuna inandırır.
+4) THE ORDERING IS MEANINGFUL: FIELDS THE MODEL ACTUALLY LOOKS AT COME FIRST
+   16 of this model's 34 features have a split count of zero — the model never
+   looks at them and their SHAP contributions are exactly 0.0. When an
+   out-of-range value arrives for `umbrella_limit` (dead) the score is GENUINELY
+   unaffected; when one arrives for `age` (live) it is not. Listing both in the
+   same order convinces the reader they carry equal weight.
 
-   Uyarı yine de ÜRETİLİR (kullanıcı "aralık dışı girdim, sistem fark etti mi?"
-   sorusunun cevabını hak eder), ama etkili olanlar listenin başına alınır.
+   The warning is still PRODUCED (a user who asks "I entered something out of
+   range, did the system notice?" deserves an answer), but the influential ones
+   are moved to the front of the list.
 
-   API sözleşmesi (CLAUDE.md) bu alanı düz bir string listesi olarak tanımlıyor
-   ve öyle kalıyor — etkinlik bilgisi zaten `/model-info -> feature_influence`
-   üzerinden servis ediliyor, frontend iki listeyi eşleştirebilir. Sözleşmeyi
-   genişletmek yerine sıralamayı anlamlı kılmak, aynı bilgiyi kırmadan taşır.
+   The API contract (CLAUDE.md) defines this field as a flat list of strings and
+   it stays that way — influence information is already served through
+   `/model-info -> feature_influence`, so the frontend can join the two lists.
+   Making the ordering meaningful carries the same information without breaking
+   the contract.
 """
 
 from __future__ import annotations
@@ -65,19 +67,20 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-# Sözleşmede sayısal kabul ettiğimiz tipler. `bool` BİLEREK dışarıda:
-# Python'da `bool` `int`in alt sınıfıdır, yani `isinstance(True, int)` doğrudur
-# ve `True` sessizce 1 gibi karşılaştırılırdı. Sayısal bir alana `true`
-# gönderen bir istemci hata değil "1" muamelesi görürdü.
+# The types we accept as numeric in the contract. `bool` is left out DELIBERATELY:
+# in Python `bool` is a subclass of `int`, so `isinstance(True, int)` is true and
+# `True` would silently compare as 1. A client sending `true` for a numeric field
+# would be treated as sending "1" rather than as an error.
 NUMERIC_TYPES = (int, float)
 
 
 class Guardrail:
-    """Eğitim aralığı dışında kalan SAYISAL alanları tespit eder.
+    """Detects NUMERIC fields that fall outside the training range.
 
-    Metadata'dan bir kez kurulur (uygulama açılışında), sonra her istekte
-    `check()` çağrılır. Aralıklar KODA GÖMÜLMEZ — `metadata.training_ranges`'ten
-    okunur, böylece model yeniden eğitilince guardrail kendiliğinden güncellenir.
+    Built once from the metadata (at application startup); `check()` is then
+    called on every request. The ranges are NOT HARD-CODED — they are read from
+    `metadata.training_ranges`, so retraining the model updates the guardrail by
+    itself.
     """
 
     def __init__(self, metadata: Mapping[str, Any]) -> None:
@@ -85,16 +88,16 @@ class Guardrail:
         influence: Mapping[str, Mapping[str, Any]] = metadata["feature_influence"]["features"]
         input_order: Sequence[str] = metadata["feature_list"]["pipeline_input_order"]
 
-        # {alan: (min, max)} — yalnızca sayısal alanlar.
+        # {field: (min, max)} — numeric fields only.
         self.numeric_bounds: dict[str, tuple[float, float]] = {
             name: (float(spec["min"]), float(spec["max"]))
             for name, spec in training_ranges.items()
             if spec["type"] == "numeric"
         }
 
-        # Sıralama anahtarı: (etkisiz mi?, girdi sırasındaki konum).
-        # `False < True` olduğu için etkili alanlar önce gelir; ikinci bileşen
-        # aynı grup içinde deterministik ve okunabilir bir sıra verir.
+        # Sort key: (is it uninfluential?, position in the input order).
+        # Since `False < True`, influential fields come first; the second
+        # component gives a deterministic, readable order within each group.
         position = {name: index for index, name in enumerate(input_order)}
         self._sort_key: dict[str, tuple[bool, int]] = {
             name: (not influence[name]["has_influence"], position[name])
@@ -102,37 +105,39 @@ class Guardrail:
         }
 
     def check(self, payload: Mapping[str, Any]) -> list[str]:
-        """Gönderilen alanlardan eğitim aralığı dışında kalanların adları.
+        """Names of the submitted fields that fall outside the training range.
 
-        Dönen liste: önce modelin gerçekten kullandığı alanlar, sonra ölü
-        alanlar; her grup içinde pipeline girdi sırası.
+        The returned list puts the fields the model actually uses first, then the
+        dead ones; within each group, the pipeline input order applies.
         """
         flagged: list[str] = []
 
         for name, (minimum, maximum) in self.numeric_bounds.items():
             value = payload.get(name)
             if value is None:
-                # Alan gönderilmedi -> varsayılanla doldurulacak (bkz. 3).
+                # Field was not sent -> it will be filled with the default (see 3).
                 continue
             if isinstance(value, bool) or not isinstance(value, NUMERIC_TYPES):
-                # Sayısal olmayan değer bu katmanın işi değil: Pydantic zaten
-                # 422 döndürür. Guardrail doğrudan (HTTP'siz) çağrıldığında da
-                # sessizce yanlış karşılaştırma yapmaktansa atlamak doğru.
+                # A non-numeric value is not this layer's problem: Pydantic
+                # already returns a 422. When the guardrail is called directly
+                # (without HTTP), skipping beats silently making a wrong
+                # comparison.
                 continue
 
             try:
                 numeric = float(value)
             except OverflowError:
-                # `10**10000` gibi devasa bir `int` float'a sığmaz (Codex F2-3).
-                # HTTP yolundan erişilemez (Pydantic sınırları çok daha dar ve
-                # JSON kodlayıcı zaten patlar), ama bu modül HTTP'siz de
-                # çağrılabiliyor. Aralığın dışında olduğu kesin: işaretle, patlama.
+                # A huge `int` such as `10**10000` does not fit in a float
+                # (Codex F2-3). Unreachable through HTTP (Pydantic's bounds are
+                # far tighter and the JSON encoder would blow up first), but this
+                # module can also be called without HTTP. It is certainly outside
+                # the range: flag it, do not crash.
                 flagged.append(name)
                 continue
 
             if math.isnan(numeric):
-                # NaN her karşılaştırmada False verir; kontrol etmeseydik
-                # "aralık içinde" sayılıp SESSİZCE geçerdi.
+                # NaN compares False against everything; without this check it
+                # would count as "inside the range" and pass SILENTLY.
                 flagged.append(name)
                 continue
 

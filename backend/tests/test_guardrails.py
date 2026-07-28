@@ -1,15 +1,15 @@
-"""Faz 2 — guardrail (OOD tespiti) testleri.
+"""Phase 2 — guardrail (OOD detection) tests.
 
-TEST FELSEFESİ
---------------
-Guardrail'in tehlikesi, "çalışıyor" görünürken hiçbir şey yapmamasıdır: her
-istekte boş liste döndüren bir fonksiyon da mutlu mesut yeşil kalır. Bu yüzden
-buradaki testler iki yönü birden bağlar — uyarı ÇIKMASI gereken yerde çıkıyor
-mu, ve çıkmaMASI gereken yerde susuyor mu.
+TEST PHILOSOPHY
+---------------
+The danger with a guardrail is that it looks like it is "working" while doing
+nothing at all: a function that returns an empty list on every request stays
+happily green. So the tests here pin down both directions — does a warning fire
+where it should, and does it stay silent where it should not?
 
-Ayrıca guardrail'in eşikleri KODA GÖMÜLÜ OLMAMALI. Gömülü olsaydı model
-yeniden eğitildiğinde uyarılar sessizce yalan söylemeye başlardı; bunu bir
-metadata mutasyonuyla test ediyoruz.
+The guardrail's thresholds must also NOT BE HARD-CODED. If they were, the
+warnings would start lying silently once the model was retrained; we test that
+with a metadata mutation.
 """
 
 from __future__ import annotations
@@ -28,22 +28,22 @@ from app.schemas import PREDICT_REQUEST_EXAMPLE, PredictRequest
 
 @pytest.fixture(scope="session")
 def guardrail(bundle: ModelBundle) -> Guardrail:
-    """Uygulamanın gerçekten kullandığı guardrail nesnesi."""
+    """The guardrail object the application actually uses."""
     return bundle.guardrail
 
 
 # --------------------------------------------------------------------------- #
-# 1) Temel davranış
+# 1) Basic behaviour
 # --------------------------------------------------------------------------- #
 
 
 def test_values_inside_the_training_range_produce_no_warning(
     guardrail: Guardrail, metadata: dict[str, Any]
 ) -> None:
-    """Eğitim aralığının İÇİNDEKİ hiçbir değer uyarı üretmemeli.
+    """No value INSIDE the training range may produce a warning.
 
-    Her sayısal alan için aralığın ORTA noktası deneniyor: guardrail'in
-    "her şeye uyarı basan" bir hâle düşmediğinin kanıtı.
+    The MIDPOINT of the range is tried for every numeric field: proof that the
+    guardrail has not degenerated into something that warns about everything.
     """
     ranges = metadata["training_ranges"]
     payload = {
@@ -51,17 +51,17 @@ def test_values_inside_the_training_range_produce_no_warning(
         for name, spec in ranges.items()
         if spec["type"] == "numeric"
     }
-    assert len(payload) == 18, "sayısal alan sayısı değişmiş"
+    assert len(payload) == 18, "the number of numeric fields has changed"
     assert guardrail.check(payload) == []
 
 
 def test_every_numeric_field_can_be_flagged(
     guardrail: Guardrail, metadata: dict[str, Any]
 ) -> None:
-    """18 sayısal alanın HER BİRİ için OOD tetiklenebiliyor.
+    """OOD can be triggered for EACH of the 18 numeric fields.
 
-    Tek bir alanın kontrolü unutulsaydı ya da yanlış anahtarla okunsaydı
-    (ör. `capital_gains` vs `capital-gains`) burası yakalar.
+    If a single field's check were forgotten, or read under the wrong key (e.g.
+    `capital_gains` vs `capital-gains`), this catches it.
     """
     ranges = metadata["training_ranges"]
     numeric = {n: s for n, s in ranges.items() if s["type"] == "numeric"}
@@ -69,34 +69,35 @@ def test_every_numeric_field_can_be_flagged(
     for name, spec in numeric.items():
         above = guardrail.check({name: spec["max"] + 1})
         below = guardrail.check({name: spec["min"] - 1})
-        assert above == [name], f"{name}: üst sınırın üstü işaretlenmedi ({above})"
-        assert below == [name], f"{name}: alt sınırın altı işaretlenmedi ({below})"
+        assert above == [name], f"{name}: above the upper bound was not flagged ({above})"
+        assert below == [name], f"{name}: below the lower bound was not flagged ({below})"
 
 
 def test_range_boundaries_are_inclusive(
     guardrail: Guardrail, metadata: dict[str, Any]
 ) -> None:
-    """Eğitimde GÖRÜLEN uç değerler uyarı üretmemeli.
+    """Extreme values SEEN in training must not produce a warning.
 
-    `min` ve `max` eğitim verisinde fiilen gözlemlenmiş değerlerdir; onları
-    "dağılım dışı" saymak, modelin gördüğü veriyi görmedi diye işaretlemek olur.
+    `min` and `max` are values actually observed in the training data; calling
+    them "out of distribution" would mean flagging data the model saw as data it
+    did not see.
     """
     ranges = metadata["training_ranges"]
     for name, spec in ranges.items():
         if spec["type"] != "numeric":
             continue
-        assert guardrail.check({name: spec["min"]}) == [], f"{name}: min uyarı verdi"
-        assert guardrail.check({name: spec["max"]}) == [], f"{name}: max uyarı verdi"
+        assert guardrail.check({name: spec["min"]}) == [], f"{name}: min produced a warning"
+        assert guardrail.check({name: spec["max"]}) == [], f"{name}: max produced a warning"
 
 
 def test_constant_field_flags_anything_but_the_single_observed_value(
     guardrail: Guardrail, metadata: dict[str, Any]
 ) -> None:
-    """`incident_year` eğitimde SABİT (min=max=2015) — 2015 dışı her şey OOD.
+    """`incident_year` is CONSTANT in training (min=max=2015) — anything else is OOD.
 
-    Kenar durum: min ile max eşit olduğunda aralık tek bir noktaya iner.
-    Bu veri setinin gerçeği (tüm olaylar 2015'te) ve guardrail'in en dar
-    aralıkta da doğru çalıştığının kanıtı.
+    Edge case: when min equals max, the range collapses to a single point. That is
+    the reality of this dataset (every incident is in 2015) and proof that the
+    guardrail works correctly even on the narrowest possible range.
     """
     spec = metadata["training_ranges"]["incident_year"]
     assert spec["min"] == spec["max"] == 2015
@@ -107,27 +108,28 @@ def test_constant_field_flags_anything_but_the_single_observed_value(
 
 
 # --------------------------------------------------------------------------- #
-# 2) "Gönderilmedi" ile "aralık dışı" farkı
+# 2) The difference between "not sent" and "out of range"
 # --------------------------------------------------------------------------- #
 
 
 def test_missing_fields_are_never_flagged(guardrail: Guardrail) -> None:
-    """Gönderilmeyen alan uyarı üretmez — varsayılanla dolar.
+    """A field that was not sent produces no warning — it gets a default.
 
-    Bu ayrım olmasaydı boş bir istek (`{}`) 34 alanın hepsi için uyarı basardı
-    ve alan tamamen değersizleşirdi. `metadata.defaults` değerleri tanım gereği
-    eğitim aralığının içindedir; kullanıcının dokunmadığı bir alanı sorunlu
-    göstermek yanlış olur.
+    Without this distinction an empty request (`{}`) would print a warning for all
+    34 fields and the field would become worthless. The `metadata.defaults` values
+    are inside the training range by definition; marking a field the user never
+    touched as problematic would be wrong.
     """
     assert guardrail.check({}) == []
 
 
 def test_explicit_null_is_treated_as_missing_not_as_zero(guardrail: Guardrail) -> None:
-    """Açıkça `null` gönderilen alan da "gönderilmedi" sayılır.
+    """A field explicitly sent as `null` also counts as "not sent".
 
-    `None`'ı sayısal karşılaştırmaya soksaydık TypeError alırdık; sessizce 0
-    kabul etseydik `capital-loss` gibi negatif aralıklı alanlarda YANLIŞ uyarı
-    üretirdik. `prepare_row()` de aynı ayrımı yapıyor (model.py K3).
+    Feeding `None` into a numeric comparison would raise a TypeError; silently
+    treating it as 0 would produce a FALSE warning on a field with a negative
+    range such as `capital-loss`. `prepare_row()` makes the same distinction
+    (model.py K3).
     """
     assert guardrail.check({"age": None, "witnesses": None}) == []
 
@@ -135,30 +137,30 @@ def test_explicit_null_is_treated_as_missing_not_as_zero(guardrail: Guardrail) -
 def test_defaults_never_trigger_a_warning(
     guardrail: Guardrail, metadata: dict[str, Any]
 ) -> None:
-    """Varsayılan değerlerin hepsi eğitim aralığının içinde.
+    """Every default value lies inside the training range.
 
-    Bu bir tutarlılık kontrolü: `defaults` medyan/moddan üretiliyor, dolayısıyla
-    aralık içinde olmak ZORUNDA. Değilse guardrail ile defaults birbiriyle
-    çelişiyor demektir ve boş bir istek bile uyarı üretirdi.
+    This is a consistency check: `defaults` is derived from the median/mode, so it
+    MUST be inside the range. If it were not, the guardrail and the defaults would
+    contradict each other and even an empty request would produce warnings.
     """
     defaults = {name: spec["value"] for name, spec in metadata["defaults"].items()}
     assert guardrail.check(defaults) == []
 
 
 # --------------------------------------------------------------------------- #
-# 3) Kapsam sınırı: kategorik alanlar (Codex C-4)
+# 3) Scope boundary: categorical fields (Codex C-4)
 # --------------------------------------------------------------------------- #
 
 
 def test_categorical_fields_are_out_of_scope(
     guardrail: Guardrail, metadata: dict[str, Any]
 ) -> None:
-    """Kategorik alanlar guardrail'in kapsamında DEĞİL — ve bu bilinçli.
+    """Categorical fields are NOT in the guardrail's scope — deliberately.
 
-    `schemas.py`'daki `Literal` bilinmeyen kategoriyi 422 ile keser, yani
-    kategorik bir OOD değeri buraya HİÇ ULAŞAMAZ. Kontrol yazsaydık ölü kod
-    olurdu. Test bu sınırı açıkça kayda geçiriyor: kapsam daralırsa/genişlerse
-    burası konuşur.
+    The `Literal` in `schemas.py` cuts an unknown category off with a 422, so a
+    categorical OOD value can NEVER REACH here. Writing a check would produce dead
+    code. This test puts the boundary explicitly on record: if the scope narrows
+    or widens, this speaks up.
     """
     categorical = [
         name for name, spec in metadata["training_ranges"].items()
@@ -168,17 +170,18 @@ def test_categorical_fields_are_out_of_scope(
 
     for name in categorical:
         assert name not in guardrail.numeric_bounds
-        # Kategorik alana çöp değer verilse bile guardrail susar.
-        assert guardrail.check({name: "EGITIMDE-OLMAYAN-DEGER"}) == []
+        # Even given junk, the guardrail stays silent on a categorical field.
+        assert guardrail.check({name: "VALUE-NOT-SEEN-IN-TRAINING"}) == []
 
 
 def test_unknown_category_is_rejected_by_the_api_not_by_the_guardrail(
     client: TestClient,
 ) -> None:
-    """Kategorik OOD'nin gerçek davranışı: uyarı değil 422.
+    """The real behaviour of categorical OOD: a 422, not a warning.
 
-    Faz 4'teki UI banner'ı "kategorik OOD uyarısı gelir" varsayımıyla yazılırsa
-    sessizce yanlış olur. Bu test o varsayımı baştan kırar.
+    If the Phase 4 UI banner is written on the assumption that categorical OOD
+    warnings arrive, it will be silently wrong. This test breaks that assumption
+    up front.
     """
     response = client.post("/predict", json={"policy_state": "TX"})
     assert response.status_code == 422
@@ -187,31 +190,32 @@ def test_unknown_category_is_rejected_by_the_api_not_by_the_guardrail(
 
 
 # --------------------------------------------------------------------------- #
-# 4) Sıralama: modelin gerçekten baktığı alanlar önce
+# 4) Ordering: fields the model actually looks at come first
 # --------------------------------------------------------------------------- #
 
 
 def test_influential_fields_are_listed_before_dead_ones(
     guardrail: Guardrail, metadata: dict[str, Any]
 ) -> None:
-    """Etkili alanlar listenin başında, ölü alanlar sonunda.
+    """Influential fields at the front of the list, dead ones at the back.
 
-    `umbrella_limit` (split_count=0) için aralık dışı bir değer skoru GERÇEKTEN
-    etkilemez; `age` (canlı) için etkiler. İkisini karışık sırada listelemek
-    okuyucuyu ikisinin aynı ağırlıkta olduğuna inandırırdı.
+    An out-of-range value for `umbrella_limit` (split_count=0) GENUINELY does not
+    affect the score; for `age` (live) it does. Listing them in mixed order would
+    convince the reader they carry equal weight.
     """
     influence = metadata["feature_influence"]["features"]
     order = metadata["feature_list"]["pipeline_input_order"]
 
-    # TEST SEÇİMİ ÖNEMLİ: ölü alanlar girdi sırasında canlı alanlardan ÖNCE
-    # gelmeli, yoksa test sıralama olmadan da geçer (totolojik olur — ilk hâli
-    # tam olarak buna düşmüştü ve mutasyon testinde yakalandı).
+    # THE CHOICE OF FIELDS MATTERS: the dead fields must come BEFORE the live ones
+    # in the input order, otherwise the test passes even without the sorting (it
+    # becomes tautological — the first version fell into exactly that trap and was
+    # caught by mutation testing).
     #
-    #   policy_deductable  sıra  4  ÖLÜ      witnesses   sıra 24  CANLI
-    #   umbrella_limit     sıra  6  ÖLÜ      auto_year   sıra 31  CANLI
+    #   policy_deductable  position  4  DEAD      witnesses   position 24  LIVE
+    #   umbrella_limit     position  6  DEAD      auto_year   position 31  LIVE
     #
-    # Sıralama yapılmasaydı sonuç ["policy_deductable", "umbrella_limit",
-    # "witnesses", "auto_year"] olurdu.
+    # Without the sorting the result would be ["policy_deductable",
+    # "umbrella_limit", "witnesses", "auto_year"].
     for dead in ("policy_deductable", "umbrella_limit"):
         assert influence[dead]["has_influence"] is False
     for alive in ("witnesses", "auto_year"):
@@ -228,12 +232,12 @@ def test_influential_fields_are_listed_before_dead_ones(
         }
     )
     assert warnings == ["witnesses", "auto_year", "policy_deductable", "umbrella_limit"], (
-        f"canlı alanlar başa alınmadı: {warnings}"
+        f"live fields were not moved to the front: {warnings}"
     )
 
 
 def test_ordering_is_deterministic(guardrail: Guardrail) -> None:
-    """Aynı girdi -> aynı sıra. Sözlük ekleme sırasına bağlı kalmamalı."""
+    """Same input -> same order. It must not depend on dict insertion order."""
     first = guardrail.check({"age": 110, "witnesses": 9, "auto_year": 2050})
     second = guardrail.check({"auto_year": 2050, "witnesses": 9, "age": 110})
     assert first == second
@@ -241,21 +245,21 @@ def test_ordering_is_deterministic(guardrail: Guardrail) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 5) Eşikler metadata'dan gelir, koda gömülü DEĞİL
+# 5) Thresholds come from the metadata, they are NOT hard-coded
 # --------------------------------------------------------------------------- #
 
 
 def test_thresholds_come_from_metadata_not_from_hardcoded_values(
     bundle: ModelBundle,
 ) -> None:
-    """Metadata'daki aralık değişirse guardrail'in davranışı da değişmeli.
+    """If the range in the metadata changes, the guardrail's behaviour must change too.
 
-    Eşikler koda gömülü olsaydı model yeniden eğitildiğinde uyarılar sessizce
-    yalan söylemeye başlardı — "bu değeri görmedim" derken aslında görmüş
-    olurdu. Test, aralığı daraltıp daha önce temiz geçen bir değerin artık
-    işaretlendiğini gösteriyor.
+    Were the thresholds hard-coded, the warnings would start lying silently after a
+    retrain — saying "I have not seen this value" when in fact it had. The test
+    narrows the range and shows that a value which previously passed cleanly is
+    now flagged.
     """
-    # Gerçek aralıkta 30 yaş tamamen normal (20-64).
+    # In the real range, age 30 is entirely normal (20-64).
     assert bundle.guardrail.check({"age": 30}) == []
 
     narrowed = copy.deepcopy(bundle.metadata)
@@ -266,37 +270,38 @@ def test_thresholds_come_from_metadata_not_from_hardcoded_values(
     assert probe.check({"age": 30}) == ["age"]
     assert probe.check({"age": 45}) == []
 
-    # Orijinal guardrail etkilenmemeli (paylaşılan durum sızıntısı yok).
+    # The original guardrail must be unaffected (no shared-state leak).
     assert bundle.guardrail.check({"age": 30}) == []
 
 
 # --------------------------------------------------------------------------- #
-# 6) Sessiz geçiş tuzakları
+# 6) Silent-pass traps
 # --------------------------------------------------------------------------- #
 
 
 def test_nan_is_flagged_instead_of_silently_passing(guardrail: Guardrail) -> None:
-    """NaN "aralık içinde" sayılıp sessizce geçmemeli.
+    """NaN must not count as "inside the range" and pass silently.
 
-    `nan < min` ve `nan > max` İKİSİ DE False döner. Özel kontrol olmasaydı NaN
-    temiz bir istek gibi görünürdü — guardrail'in en sinsi sessiz hatası.
+    `nan < min` and `nan > max` are BOTH False. Without a dedicated check, NaN
+    would look like a clean request — the guardrail's most insidious silent
+    failure.
     """
     assert guardrail.check({"age": math.nan}) == ["age"]
 
 
 def test_infinity_is_flagged(guardrail: Guardrail) -> None:
-    """Sonsuz değer her üst sınırı aşar."""
+    """An infinite value exceeds every upper bound."""
     assert guardrail.check({"age": math.inf}) == ["age"]
     assert guardrail.check({"capital-loss": -math.inf}) == ["capital-loss"]
 
 
 def test_huge_integers_are_flagged_not_crashed(guardrail: Guardrail) -> None:
-    """Float'a sığmayan devasa `int` istisna değil uyarı üretmeli (Codex F2-3).
+    """A huge `int` that does not fit in a float must warn, not raise (Codex F2-3).
 
-    `float(10**10000)` `OverflowError` fırlatır. HTTP yolundan erişilemez
-    (Pydantic sınırları çok daha dar, JSON kodlayıcı zaten patlar) ama bu modül
-    HTTP'siz de çağrılabiliyor ve bir OOD tespit katmanının aşırı büyük girdide
-    çökmesi ironik olurdu.
+    `float(10**10000)` raises `OverflowError`. It is unreachable through HTTP
+    (Pydantic's bounds are far tighter and the JSON encoder blows up first), but
+    this module can also be called without HTTP, and an OOD detection layer
+    crashing on oversized input would be ironic.
     """
     assert guardrail.check({"age": 10**10000}) == ["age"]
     assert guardrail.check({"capital-loss": -(10**10000)}) == ["capital-loss"]
@@ -305,70 +310,71 @@ def test_huge_integers_are_flagged_not_crashed(guardrail: Guardrail) -> None:
 def test_booleans_are_rejected_over_http_not_silently_coerced(
     client: TestClient,
 ) -> None:
-    """`true` sayısal alanda 1 olarak SKORLANMAMALI (Codex F2-1).
+    """`true` must NOT be SCORED as 1 on a numeric field (Codex F2-1).
 
-    ÖLÇÜLEN DAVRANIŞ (düzeltmeden önce): Pydantic'in lax modu `true`yu 1'e
-    çeviriyordu, yani `guardrails.py`'daki bool koruması HTTP yolunda hiç
-    devreye girmiyordu — guardrail değeri zaten `int` olarak alıyordu.
+    MEASURED BEHAVIOUR (before the fix): Pydantic's lax mode converted `true` to
+    1, so the bool guard in `guardrails.py` never engaged on the HTTP path — the
+    guardrail already received the value as an `int`.
 
-        {"witnesses": true}          -> 200, uyarı yok
-        {"total_claim_amount": true} -> 200, OOD uyarısı (1 < 1920)
-        {"capital-gains": false}     -> 200, uyarı yok
+        {"witnesses": true}          -> 200, no warning
+        {"total_claim_amount": true} -> 200, OOD warning (1 < 1920)
+        {"capital-gains": false}     -> 200, no warning
 
-    Bu testi guardrail seviyesinde değil ENDPOINT seviyesinde yazmak şart:
-    `Guardrail.check()` doğrudan çağrıldığında bool'u zaten atlıyordu ve o test
-    yeşil kalarak gerçek açığı gizliyordu.
+    Writing this test at the ENDPOINT level rather than the guardrail level is
+    essential: called directly, `Guardrail.check()` already skipped the bool, and
+    that test stayed green while hiding the real hole.
     """
     for field in ("witnesses", "total_claim_amount", "capital-gains", "bodily_injuries"):
         for value in (True, False):
             response = client.post("/predict", json={field: value})
             assert response.status_code == 422, (
-                f"{field}={value} kabul edildi ({response.status_code}) — "
-                "boolean sessizce sayıya dönüştürülüyor"
+                f"{field}={value} was accepted ({response.status_code}) — "
+                "a boolean is being silently coerced into a number"
             )
 
-    # Gerçek sayılar etkilenmemeli.
+    # Real numbers must be unaffected.
     assert client.post("/predict", json={"witnesses": 1}).status_code == 200
     assert client.post("/predict", json={"capital-gains": 0}).status_code == 200
 
 
 def test_booleans_are_not_treated_as_numbers(guardrail: Guardrail) -> None:
-    """`True` sessizce 1 gibi karşılaştırılmamalı.
+    """`True` must not be silently compared as 1.
 
-    Python'da `bool`, `int`in alt sınıfıdır: `isinstance(True, int)` doğrudur.
-    Kontrol etmeseydik `witnesses: true` gönderen bir istemci "1 tanık" muamelesi
-    görürdü. Bu katman karar vermez — Pydantic zaten 422 döndürür — ama guardrail
-    doğrudan çağrıldığında da yanlış karşılaştırma yapmamalı.
+    In Python `bool` is a subclass of `int`: `isinstance(True, int)` is true.
+    Without the check, a client sending `witnesses: true` would be treated as
+    reporting "1 witness". This layer does not decide — Pydantic already returns a
+    422 — but the guardrail must not make a wrong comparison when called directly
+    either.
     """
     assert guardrail.check({"witnesses": True}) == []
     assert guardrail.check({"age": False}) == []
 
 
 def test_non_numeric_values_are_skipped_not_crashed(guardrail: Guardrail) -> None:
-    """Sayısal alana string gelirse guardrail patlamamalı (Pydantic'in işi)."""
-    assert guardrail.check({"age": "otuz"}) == []
+    """A string on a numeric field must not crash the guardrail (that is Pydantic's job)."""
+    assert guardrail.check({"age": "thirty"}) == []
     assert guardrail.check({"witnesses": [1, 2]}) == []
 
 
 def test_unknown_keys_in_payload_are_ignored(guardrail: Guardrail) -> None:
-    """Bilinmeyen anahtar guardrail'i düşürmemeli.
+    """An unknown key must not bring the guardrail down.
 
-    API'de `extra="forbid"` bunu zaten kesiyor; guardrail HTTP'siz de
-    çağrılabildiği için kendi başına dayanıklı olmalı.
+    `extra="forbid"` on the API already cuts this off; because the guardrail can
+    also be called without HTTP, it has to be robust on its own.
     """
-    assert guardrail.check({"boyle_bir_alan_yok": 999, "age": 110}) == ["age"]
+    assert guardrail.check({"no_such_field_exists": 999, "age": 110}) == ["age"]
 
 
 # --------------------------------------------------------------------------- #
-# 7) Uçtan uca: HTTP katmanıyla birlikte
+# 7) End to end: together with the HTTP layer
 # --------------------------------------------------------------------------- #
 
 
 def test_warning_does_not_block_the_prediction(client: TestClient) -> None:
-    """OOD uyarısı tahmini ENGELLEMEZ — skor yine döner.
+    """An OOD warning does NOT block the prediction — the score still comes back.
 
-    Guardrail'in tasarım kararı: reddetmek değil, işaretlemek. Sigorta eksperi
-    için "reddedilen talep" ile "modelin emin olmadığı talep" aynı şey değil.
+    The guardrail's design decision: flag, do not reject. For an adjuster, "a
+    rejected claim" and "a claim the model is unsure about" are not the same thing.
     """
     response = client.post("/predict", json={"witnesses": 9, "auto_year": 2050})
     assert response.status_code == 200
@@ -382,12 +388,12 @@ def test_warning_does_not_block_the_prediction(client: TestClient) -> None:
 def test_training_extremes_pass_through_both_layers(
     client: TestClient, metadata: dict[str, Any]
 ) -> None:
-    """Eğitimin uç değerleri hem Pydantic'ten hem guardrail'den temiz geçmeli.
+    """The training extremes must pass cleanly through both Pydantic and the guardrail.
 
-    İki katmanın çakışmadığının kanıtı: Pydantic sınırı eğitim aralığının ÜST
-    KÜMESİ olmak zorunda (schemas.py girişindeki 1. madde). Bir alanda Pydantic
-    sınırı eğitim aralığının içine düşseydi, modelin gördüğü bir değeri 422 ile
-    reddederdik.
+    Proof that the two layers do not collide: a Pydantic bound has to be a SUPERSET
+    of the training range (point 1 at the top of schemas.py). If a field's Pydantic
+    bound fell inside the training range, we would reject with a 422 a value the
+    model has actually seen.
     """
     ranges = metadata["training_ranges"]
     numeric = {n: s for n, s in ranges.items() if s["type"] == "numeric"}
@@ -395,17 +401,17 @@ def test_training_extremes_pass_through_both_layers(
     for bound in ("min", "max"):
         payload = {name: spec[bound] for name, spec in numeric.items()}
         response = client.post("/predict", json=payload)
-        assert response.status_code == 200, f"{bound} uçları reddedildi: {response.text}"
+        assert response.status_code == 200, f"the {bound} extremes were rejected: {response.text}"
         assert response.json()["out_of_distribution_warnings"] == []
 
 
 def test_shap_values_are_still_correct_when_a_warning_fires(
     client: TestClient, bundle: ModelBundle
 ) -> None:
-    """Uyarı üretmek tahmin yolunu bozmamalı.
+    """Producing a warning must not disturb the prediction path.
 
-    Guardrail `predict()` içine eklendi; SHAP toplanabilirliği hâlâ geçerli
-    olmalı (yani guardrail hesap yoluna karışmıyor).
+    The guardrail was added inside `predict()`; SHAP additivity must still hold
+    (i.e. the guardrail does not interfere with the computation).
     """
     payload = {"witnesses": 9, "age": 110, "incident_severity": "Major Damage"}
     body = client.post("/predict", json=payload).json()
@@ -416,30 +422,31 @@ def test_shap_values_are_still_correct_when_a_warning_fires(
     reconstructed = 1.0 / (1.0 + math.exp(-margin))
     assert reconstructed == pytest.approx(body["fraud_probability"], abs=1e-9)
 
-    # Doğrudan model katmanı da aynı uyarıları vermeli.
+    # The model layer called directly must produce the same warnings.
     direct = bundle.predict(PredictRequest(**payload).model_dump(by_alias=True))
     assert direct["out_of_distribution_warnings"] == body["out_of_distribution_warnings"]
 
 
 def test_example_request_from_claude_md_is_clean(client: TestClient) -> None:
-    """CLAUDE.md'deki örnek istek tamamen eğitim aralığının içinde."""
+    """The example request in CLAUDE.md is entirely inside the training range."""
     body = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     assert body["out_of_distribution_warnings"] == []
 
 
 # --------------------------------------------------------------------------- #
-# 8) TEK YÖNLÜ KÖRLÜK — guardrail'in HTTP üzerinden gerçek kapsamı
+# 8) ONE-WAY BLINDNESS — the guardrail's real reach over HTTP
 # --------------------------------------------------------------------------- #
 
 
-# Pydantic ALT sınırı eğitim minimumuna eşit olan alanlar: bu alanlarda
-# "eğitim aralığının altında" yönünde OOD API üzerinden HİÇ tetiklenemez,
-# çünkü daha küçük bir değer zaten 422 alır.
+# Fields whose Pydantic LOWER bound equals the training minimum: for these,
+# "below the training range" OOD can NEVER be triggered through the API, because a
+# smaller value already gets a 422.
 #
-# Bu bir hata DEĞİL, fiziksel gerçeğin sonucu: tanık sayısı 0'ın altına, araç
-# sayısı 1'in altına inemez. Eğitim seti bu alanların fiziksel tabanına zaten
-# değiyor. Sınırları gevşetmek, fiziksel olarak imkânsız girdileri modele
-# sokmak olurdu (bkz. `schemas.py` girişindeki "TEK YÖNLÜ KÖRLÜK" notu).
+# This is NOT a bug but a consequence of physical reality: the number of witnesses
+# cannot go below 0, the number of vehicles cannot go below 1. The training set
+# already touches the physical floor of these fields. Loosening the bounds would
+# mean feeding physically impossible input to the model (see the "ONE-WAY
+# BLINDNESS" note at the top of `schemas.py`).
 BLIND_BELOW = {
     "months_as_customer",
     "capital-gains",
@@ -451,31 +458,31 @@ BLIND_BELOW = {
     "property_claim",
 }
 
-# Aynı durumun üst sınırdaki hâli.
+# The same situation at the upper bound.
 BLIND_ABOVE = {"capital-loss", "incident_hour_of_the_day"}
 
 
 def _pydantic_bounds(column: str) -> tuple[float, float]:
-    """Alanın YAYINLANAN JSON Schema sınırları (frontend'in gördüğü sözleşme)."""
+    """The field's PUBLISHED JSON Schema bounds (the contract the frontend sees)."""
     properties = PredictRequest.model_json_schema()["properties"]
     branches = [
         branch
         for branch in properties[column].get("anyOf", [properties[column]])
         if branch.get("type") != "null"
     ]
-    assert len(branches) == 1, f"'{column}' için beklenmeyen şema dalı"
+    assert len(branches) == 1, f"unexpected schema branch for '{column}'"
     return float(branches[0]["minimum"]), float(branches[0]["maximum"])
 
 
 def test_one_way_blindness_matches_the_documented_list(
     metadata: dict[str, Any],
 ) -> None:
-    """Guardrail'in hangi yönde tetiklenemediği ÖLÇÜLÜR, varsayılmaz.
+    """Which direction the guardrail cannot fire in is MEASURED, not assumed.
 
-    `schemas.py` bu listeyi yorumda beyan ediyor. Beyan ile gerçek ayrışırsa
-    (ör. bir alanın Pydantic sınırı değişirse) burası konuşur — aksi hâlde
-    Faz 4'te "bu alanda neden hiç uyarı gelmiyor?" sorusu çok daha pahalıya
-    cevaplanırdı.
+    `schemas.py` declares this list in a comment. If the declaration and reality
+    diverge (e.g. a field's Pydantic bound changes), this speaks up — otherwise
+    "why does this field never warn?" would be a much more expensive question to
+    answer in Phase 4.
     """
     ranges = metadata["training_ranges"]
     measured_below: set[str] = set()
@@ -491,34 +498,34 @@ def test_one_way_blindness_matches_the_documented_list(
             measured_above.add(column)
 
     assert measured_below == BLIND_BELOW, (
-        "alt yönde kör alanlar listesi değişmiş — schemas.py'daki not güncellenmeli"
+        "the list of fields blind below has changed — the note in schemas.py needs updating"
     )
     assert measured_above == BLIND_ABOVE, (
-        "üst yönde kör alanlar listesi değişmiş — schemas.py'daki not güncellenmeli"
+        "the list of fields blind above has changed — the note in schemas.py needs updating"
     )
 
 
 def test_blind_direction_returns_422_instead_of_a_warning(client: TestClient) -> None:
-    """Kör yönde uyarı DEĞİL 422 gelir — davranışın uçtan uca kanıtı.
+    """In a blind direction a 422 arrives, NOT a warning — end-to-end proof of the behaviour.
 
-    Guardrail'in "sessizce çalışmıyor" olduğu izlenimini önler: o yönde uyarı
-    üretilmemesinin sebebi guardrail'in çalışmaması değil, isteğin ona hiç
-    ulaşmamasıdır.
+    It prevents the impression that the guardrail is "silently not working": the
+    reason no warning is produced in that direction is not that the guardrail
+    failed, but that the request never reached it.
     """
-    # witnesses eğitimde 0-3; 0'ın altı fiziksel olarak imkânsız.
+    # witnesses is 0-3 in training; below 0 is physically impossible.
     assert client.post("/predict", json={"witnesses": -1}).status_code == 422
-    # Ama ÜST yönde guardrail devrede.
+    # But in the UPWARD direction the guardrail is active.
     body = client.post("/predict", json={"witnesses": 9})
     assert body.status_code == 200
     assert body.json()["out_of_distribution_warnings"] == ["witnesses"]
 
 
 def test_fields_blind_in_both_directions_can_never_warn(client: TestClient) -> None:
-    """`incident_hour_of_the_day` iki yönde de kör — hiçbir zaman uyarı veremez.
+    """`incident_hour_of_the_day` is blind in both directions — it can never warn.
 
-    Günün saati tanımı gereği 0-23'tür ve eğitim seti bu aralığın tamamını
-    kapsıyor. Yani bu alan için OOD kavramı anlamsızdır. Faz 4'te bu alanın
-    yanına "uyarı gelebilir" göstergesi konulmamalı.
+    The hour of the day is 0-23 by definition and the training set covers the whole
+    range. So the concept of OOD is meaningless for this field. Phase 4 must not
+    put a "a warning may appear" indicator next to it.
     """
     assert "incident_hour_of_the_day" in BLIND_BELOW & BLIND_ABOVE
 

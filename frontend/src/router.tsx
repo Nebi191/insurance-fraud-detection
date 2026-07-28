@@ -1,21 +1,22 @@
 /**
- * İki sayfalık bir uygulama için minik History API yönlendiricisi.
+ * A tiny History API router for a two-page application.
  *
- * NEDEN react-router DEĞİL
- * -----------------------
- * `react-router-dom` kurulduğunda `npm audit` iki HIGH severity açık raporladı
- * (GHSA-qwww-vcr4-c8h2, RSC modunda CSRF bypass) ve `npm audit fix` çözemedi —
- * açık kütüphanenin bütün güncel sürümlerini kapsıyor. Açık RSC moduna özgü,
- * yani SPA olarak kullanan bizi pratikte etkilemiyordu; ama bu bir portfolyo
- * demosu ve müşteri `npm audit` çıktısına bakabilir. "Etkilenmiyoruz" demek
- * yerine bağımlılığı kaldırmak hem sorunu hem 46 paketi birden çözdü.
+ * WHY NOT react-router
+ * --------------------
+ * Installing `react-router-dom` made `npm audit` report two HIGH severity
+ * advisories (GHSA-qwww-vcr4-c8h2, a CSRF bypass in RSC mode) and `npm audit fix`
+ * could not resolve them — the advisory covers every current release of the
+ * library. The vulnerability is specific to RSC mode, so using it as an SPA did
+ * not put us at practical risk; but this is a portfolio demo and a client may
+ * well look at `npm audit` output. Dropping the dependency, rather than arguing
+ * "we are not affected", resolved both the finding and 46 packages at once.
  *
- * Kaybedilen bir şey yok: iki rota için gereken tek şey `pushState` + `popstate`
- * dinleyicisi. URL paylaşılabilirliği ve tarayıcı geri tuşu korunuyor.
+ * Nothing was lost: two routes need nothing more than `pushState` plus a
+ * `popstate` listener. Shareable URLs and the browser back button still work.
  *
- * FAZ 7 NOTU: Netlify'da SPA yönlendirmesi için `_redirects` dosyası şart
- * (`/* /index.html 200`), aksi hâlde `/model-card` adresine doğrudan girildiğinde
- * 404 alınır. Bu, react-router kullansaydık da gerekliydi.
+ * PHASE 7 NOTE: Netlify needs a `_redirects` file for SPA routing
+ * (`/* /index.html 200`), otherwise navigating straight to `/model-card` returns
+ * a 404. That would have been required with react-router too.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -27,7 +28,7 @@ function routeFromPath(pathname: string): Route {
 }
 
 function pathForRoute(route: Route): string {
-  // `import.meta.env.BASE_URL` sondaki eğik çizgiyi zaten içerir.
+  // `import.meta.env.BASE_URL` already includes the trailing slash.
   const base = import.meta.env.BASE_URL;
   return route === "model-card" ? `${base}model-card` : base;
 }
@@ -39,7 +40,7 @@ export function useRoute(): {
   const [route, setRoute] = useState<Route>(() => routeFromPath(window.location.pathname));
 
   useEffect(() => {
-    // Tarayıcı geri/ileri tuşu.
+    // Browser back/forward buttons.
     const onPopState = () => setRoute(routeFromPath(window.location.pathname));
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -55,8 +56,8 @@ export function useRoute(): {
 }
 
 /**
- * Gerçek bir `<a href>` — orta tık, "yeni sekmede aç" ve kopyalanabilir bağlantı
- * çalışmaya devam eder. Yalnızca düz sol tıkta sayfa yenilemesi engellenir.
+ * A real `<a href>` — middle click, "open in new tab" and copying the link all
+ * keep working. Only a plain left click is intercepted to avoid a full reload.
  */
 export function RouteLink({
   to,

@@ -1,14 +1,15 @@
 /**
- * Tek bir form alanı.
+ * A single form field.
  *
- * Girdi tipi ELLE değil `/model-info -> training_ranges` üzerinden belirlenir:
- * `categorical` ise açılır liste (seçenekler eğitimde görülen kategoriler),
- * `numeric` ise sayı kutusu. Böylece artefakt değişince form kendini düzeltir.
+ * The input type is NOT hard-coded; it is derived from
+ * `/model-info -> training_ranges`: `categorical` renders a dropdown (options are
+ * the categories seen during training), `numeric` renders a number box. That way
+ * the form corrects itself when the artifact changes.
  *
- * Alan boş bırakılırsa istekte HİÇ GÖNDERİLMEZ; backend eğitim medyanı/moduyla
- * doldurur. Bu yüzden placeholder olarak varsayılan değeri gösteriyoruz:
- * kullanıcı "boş bıraktığım alan neyle dolduruldu?" sorusunun cevabını
- * tahmin etmek zorunda kalmıyor.
+ * A field left blank is NOT SENT in the request at all; the backend fills it
+ * with the training median/mode. That is why we show the default value as the
+ * placeholder: the user never has to guess what a field they skipped was filled
+ * in with.
  */
 
 import type { DefaultInfo, TrainingRange } from "../types";
@@ -23,9 +24,9 @@ export interface FieldControlProps {
   hasInfluence: boolean;
   value: string;
   onChange: (value: string) => void;
-  /** Backend'den gelen alan bazlı 422 mesajı. */
+  /** Per-field 422 message from the backend. */
   error?: string | undefined;
-  /** Bu alan son tahminde dağılım dışı olarak işaretlendi mi? */
+  /** Was this field flagged out of distribution on the last prediction? */
   outOfDistribution?: boolean;
 }
 
@@ -81,8 +82,8 @@ export function FieldControl({
           aria-describedby={describedBy.join(" ") || undefined}
           aria-invalid={error ? true : undefined}
         >
-          {/* Boş seçenek = "gönderme, varsayılanı kullan". */}
-          <option value="">— varsayılan: {valueLabel(String(fallback.value))} —</option>
+          {/* The empty option means "don't send it, use the default". */}
+          <option value="">— default: {valueLabel(String(fallback.value))} —</option>
           {(range.categories ?? []).map((option) => (
             <option key={option} value={option}>
               {valueLabel(option)}
@@ -97,7 +98,7 @@ export function FieldControl({
           step={meta.step ?? 1}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          placeholder={`varsayılan: ${fallback.value}`}
+          placeholder={`default: ${fallback.value}`}
           className={baseInputClass}
           aria-describedby={describedBy.join(" ") || undefined}
           aria-invalid={error ? true : undefined}
@@ -106,7 +107,7 @@ export function FieldControl({
 
       {range.type === "numeric" && range.min != null && range.max != null && (
         <p className="text-xs text-slate-400 dark:text-slate-500">
-          Eğitimde görülen aralık: {formatNumber(range.min)} – {formatNumber(range.max)}
+          Seen in training: {formatNumber(range.min)} – {formatNumber(range.max)}
         </p>
       )}
 
@@ -117,8 +118,8 @@ export function FieldControl({
         >
           <span aria-hidden="true">▲</span>
           <span>
-            Model bu değeri eğitimde görmedi. Skor yine hesaplandı ama bu alan için
-            temkinli okunmalı.
+            The model never saw this value during training. The score was still
+            computed, but read it cautiously for this field.
           </span>
         </p>
       )}
@@ -133,5 +134,5 @@ export function FieldControl({
 }
 
 function formatNumber(value: number): string {
-  return new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 2 }).format(value);
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
 }

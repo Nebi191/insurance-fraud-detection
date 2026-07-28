@@ -1,79 +1,85 @@
-"""API sözleşmesi — Pydantic v2 request/response modelleri.
+"""The API contract — Pydantic v2 request/response models.
 
-NE YAPAR, NEDEN BÖYLE YAPAR
----------------------------
-Bu dosya iki soruya cevap verir: "İstemci ne gönderebilir?" ve "Biz ne
-döndürürüz?". Modelin nasıl çalıştığına dair hiçbir bilgi burada YOKTUR —
-artefakt yükleme, imputasyon ve SHAP `model.py`'ın işidir.
+WHAT IT DOES, AND WHY IT DOES IT THIS WAY
+-----------------------------------------
+This file answers two questions: "what may the client send?" and "what do we
+return?". It holds NO knowledge of how the model works — artifact loading,
+imputation and SHAP are `model.py`'s job.
 
-1) İKİ KATMANLI DOĞRULAMA (kritik ayrım)
-   Pydantic sınırları EĞİTİM ARALIĞI DEĞİLDİR. İki katman farklı soru sorar:
+1) TWO LAYERS OF VALIDATION (a critical distinction)
+   The Pydantic bounds are NOT THE TRAINING RANGE. The two layers ask different
+   questions:
 
-       Pydantic (burası)  -> "Bu değer fiziksel/mantıksal olarak mümkün mü?"
-                             Geniş ama makul sınır. Amaç: çöp veriyi ve
-                             negatif/absürt girdiyi modele hiç sokmamak.
-       Guardrail (Faz 2)  -> "Model bu değeri eğitimde GÖRDÜ mü?"
-                             Dar eğitim aralığı (metadata.training_ranges).
+       Pydantic (here)    -> "Is this value physically/logically possible?"
+                             A wide but sensible bound. The goal is to keep junk
+                             data and negative/absurd input out of the model
+                             entirely.
+       Guardrail (Phase 2)-> "Did the model SEE this value in training?"
+                             The narrow training range (metadata.training_ranges).
 
-   Pydantic sınırlarını eğitim aralığına eşitlersek guardrail asla
-   tetiklenemez ve Faz 2 anlamsızlaşır. Örnek: `witnesses` eğitimde 0-3'tür,
-   ama 7 tanıklı bir kaza fiziksel olarak mümkündür — Pydantic kabul eder,
-   guardrail "bunu daha önce görmedim" uyarısı verir. Doğru davranış budur.
+   If we set the Pydantic bounds equal to the training range, the guardrail could
+   never fire and Phase 2 would be pointless. Example: `witnesses` is 0-3 in
+   training, but an accident with 7 witnesses is physically possible — Pydantic
+   accepts it and the guardrail says "I have not seen this before". That is the
+   correct behaviour.
 
-   Tek istisna: bazı alanların fiziksel sınırı zaten eğitim aralığıyla
-   çakışır (ör. `incident_hour_of_the_day` gerçekten 0-23'tür). Bu bilinçli,
-   alan bazında yorumlandı.
+   The one exception: for some fields the physical bound genuinely coincides with
+   the training range (e.g. `incident_hour_of_the_day` really is 0-23). That is
+   deliberate and was decided field by field.
 
-   FAZ 2 İÇİN NOT — TEK YÖNLÜ KÖRLÜK (reviewer MINOR-7):
-   Sekiz alanda Pydantic ALT sınırı eğitim minimumuna EŞİT, yani o alanlarda
-   "eğitim aralığının altında" yönünde OOD hiç tetiklenemez:
+   A NOTE FOR PHASE 2 — ONE-WAY BLINDNESS (reviewer MINOR-7):
+   For eight fields the Pydantic LOWER bound EQUALS the training minimum, so OOD
+   in the "below the training range" direction can never fire for them:
 
        months_as_customer (0), capital-gains (0), incident_hour_of_the_day (0),
        number_of_vehicles_involved (1), bodily_injuries (0), witnesses (0),
        injury_claim (0), property_claim (0)
 
-   Üst sınırda aynı durum iki alanda var: `capital-loss` (0) ve yine
+   The same holds at the upper bound for two fields: `capital-loss` (0) and again
    `incident_hour_of_the_day` (23).
 
-   Bu bir hata DEĞİL, fiziksel gerçeğin sonucu: tanık sayısı 0'ın altına,
-   araç sayısı 1'in altına inemez; bu veri setinde sermaye zararı pozitif
-   olamaz. Eğitim seti bu alanların fiziksel tabanına zaten değiyor.
-   Sınırlar BİLEREK değiştirilmedi — gevşetmek fiziksel olarak imkânsız
-   girdileri modele sokmak olurdu. Faz 2 guardrail'i "bu alanda alt yönde
-   uyarı üretilemiyor" durumunu bir eksiklik sanmamalı.
+   This is NOT a bug but a consequence of physical reality: the number of
+   witnesses cannot go below 0, the number of vehicles cannot go below 1, and in
+   this dataset capital loss cannot be positive. The training set already touches
+   the physical floor of those fields. The bounds were DELIBERATELY left alone —
+   loosening them would mean feeding physically impossible input to the model.
+   The Phase 2 guardrail must not mistake "no downward warning is possible here"
+   for a gap.
 
-2) KATEGORİK ALANLAR `Literal` İLE KAPALI
-   Pipeline'daki OrdinalEncoder `unknown_value=-1` ile kurulu; bilinmeyen bir
-   kategori geldiğinde patlamaz, sessizce -1'e kodlar ve model anlamsız ama
-   "başarılı" görünen bir tahmin üretir. Sessiz saçmalık yerine API
-   seviyesinde 422 dönmek doğrusu.
+2) CATEGORICAL FIELDS ARE CLOSED WITH `Literal`
+   The OrdinalEncoder in the pipeline is configured with `unknown_value=-1`; it
+   does not fail on an unknown category, it silently encodes it as -1 and the
+   model produces a meaningless but "successful"-looking prediction. Returning a
+   422 at the API level is the right answer to silent nonsense.
 
-   Kategori listeleri `models/metadata.json -> training_ranges` ile birebir
-   aynıdır. Elle yazıldılar (OpenAPI şemasında ve /docs'ta okunabilir olsun
-   diye), ama `tests/test_api.py::test_literal_choices_match_metadata`
-   ikisinin senkron kaldığını her koşuda doğrular.
+   The category lists match `models/metadata.json -> training_ranges` exactly.
+   They are written by hand (so they are readable in the OpenAPI schema and in
+   /docs), but `tests/test_api.py::test_literal_choices_match_metadata` verifies
+   on every run that the two stay in sync.
 
-3) HER ALAN OPSİYONEL
-   CLAUDE.md: "Verilmeyen alanlar defaults'taki medyan/mod ile doldurulur."
-   34 alanın hepsi `None` varsayılanlıdır. Doldurma İŞLEMİ burada değil,
-   `model.py` içinde tek bir yerde yapılır.
+3) EVERY FIELD IS OPTIONAL
+   CLAUDE.md: "fields that are not supplied are filled with the median/mode from
+   defaults." All 34 fields default to `None`. The filling itself does not happen
+   here but in one place inside `model.py`.
 
-4) "?" AYRI BİR ANLAMDIR (alan yok ≠ alan "?")
-   `collision_type`, `property_damage`, `police_report_available` alanlarında
-   kaynak veri setinde eksiklik `"?"` string'i olarak kodlanmıştır. Bu üç
-   alanın `Literal`ı `"?"` değerini de kabul eder:
+4) "?" MEANS SOMETHING DIFFERENT (field absent != field is "?")
+   For `collision_type`, `property_damage` and `police_report_available`, the
+   source dataset encodes missingness as the string `"?"`. The `Literal` for
+   those three fields accepts `"?"` as well:
 
-       alan hiç gönderilmedi (None) -> metadata.defaults'taki mod değeri
-       alan "?" gönderildi          -> NaN -> pipeline'ın SimpleImputer'ı
+       field never sent (None) -> the mode value from metadata.defaults
+       field sent as "?"       -> NaN -> the pipeline's SimpleImputer
 
-   İkisi bu modelde aynı sonuca varır ama aynı ŞEY değildir: ilki "bilgi
-   toplanmadı, varsayılanı kullan", ikincisi "kaynak sistemde bu alan
-   bilinmiyor olarak işaretli". Ayrımı korumak, defaults değişirse ya da
-   imputer stratejisi değişirse davranışın doğru kalmasını sağlar.
+   In this model both end up at the same result, but they are not the same THING:
+   the first means "no information was collected, use the default", the second
+   means "the source system marks this field as unknown". Preserving the
+   distinction keeps behaviour correct if the defaults or the imputer strategy
+   change.
 
 5) `extra="forbid"`
-   Bilinmeyen alan sessizce yutulmaz. `capitalgains` yazan bir istemci 422
-   alır; aksi hâlde alanı gönderdiğini sanıp aslında varsayılanla skorlanır.
+   Unknown fields are not swallowed silently. A client that writes `capitalgains`
+   gets a 422; otherwise it would believe it had sent the field while actually
+   being scored against the default.
 """
 
 from __future__ import annotations
@@ -83,7 +89,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # --------------------------------------------------------------------------- #
-# CLAUDE.md'deki örnek istek — Swagger UI'da "Try it out" için hazır gelsin.
+# The example request from CLAUDE.md — pre-filled for "Try it out" in Swagger UI.
 # --------------------------------------------------------------------------- #
 PREDICT_REQUEST_EXAMPLE = {
     "incident_severity": "Major Damage",
@@ -100,16 +106,17 @@ PREDICT_REQUEST_EXAMPLE = {
 
 
 class PredictRequest(BaseModel):
-    """`POST /predict` gövdesi — pipeline'ın 34 girdi alanı, hepsi opsiyonel.
+    """`POST /predict` body — the pipeline's 34 input fields, all optional.
 
-    Alan sırası `metadata.feature_list.pipeline_input_order` ile aynı tutuldu
-    ki /docs'taki form, modelin gerçek girdi şemasıyla aynı sırada okunsun.
+    The field order matches `metadata.feature_list.pipeline_input_order` so the
+    form in /docs reads in the same order as the model's real input schema.
 
-    ÖNEMLİ (K2): `incident_date` / `policy_bind_date` API yüzeyinde YOKTUR.
-    Pipeline tarih parse etmez; gerçek girdi şemasında zaten `incident_year` ve
-    `policy_bind_year` vardır. Ham tarih kabul edip yıl türetmek, API'ye
-    modelin görmediği bir kavram (tarih ayrıştırma, timezone, format hataları)
-    sokardı. Doğrudan yıl istiyoruz.
+    IMPORTANT (K2): `incident_date` / `policy_bind_date` do NOT exist on the API
+    surface. The pipeline does not parse dates; the real input schema already
+    contains `incident_year` and `policy_bind_year`. Accepting raw dates and
+    deriving the year would introduce a concept the model never saw (date
+    parsing, time zones, format errors) into the API. We ask for the year
+    directly.
     """
 
     model_config = ConfigDict(
@@ -120,59 +127,65 @@ class PredictRequest(BaseModel):
     @field_validator("*", mode="before")
     @classmethod
     def _reject_booleans(cls, value: Any) -> Any:
-        """`true` / `false` sayısal alanlarda sessizce 1 / 0 olmasın (Codex F2-1).
+        """Stops `true` / `false` from silently becoming 1 / 0 on numeric fields
+        (Codex F2-1).
 
-        ÖLÇÜLEN DAVRANIŞ (düzeltmeden önce):
+        MEASURED BEHAVIOUR (before the fix):
 
-            {"witnesses": true}          -> 200, uyarı yok       ("1 tanık")
-            {"total_claim_amount": true} -> 200, OOD uyarısı!     (1 < 1920)
-            {"capital-gains": false}     -> 200, uyarı yok       ("0 kazanç")
+            {"witnesses": true}          -> 200, no warning      ("1 witness")
+            {"total_claim_amount": true} -> 200, OOD warning!     (1 < 1920)
+            {"capital-gains": false}     -> 200, no warning      ("0 gains")
 
-        Pydantic'in varsayılan (lax) modu JSON `true` değerini sayısal alanlarda
-        1'e çeviriyordu. Bu iki ayrı soruna yol açıyordu:
+        Pydantic's default (lax) mode converted the JSON value `true` to 1 on
+        numeric fields. That caused two separate problems:
 
-          * `guardrails.py`'daki bool koruması HTTP yolunda ETKİSİZDİ — guardrail
-            değeri zaten `int` olarak alıyordu, `bool` olduğunu göremiyordu.
-          * Daha temeli: `witnesses: true` anlamlı bir girdi DEĞİL. Sessizce
-            "1 tanık" saymak, bu dosyanın `Literal` gerekçesiyle aynı hatayı
-            yapmak olurdu — "sessiz saçmalık yerine 422 dönmek doğrusu".
+          * The bool guard in `guardrails.py` was INEFFECTIVE on the HTTP path —
+            the guardrail already received the value as an `int` and could not see
+            that it had been a `bool`.
+          * More fundamentally: `witnesses: true` is NOT meaningful input.
+            Silently counting it as "1 witness" would repeat exactly the mistake
+            the `Literal` rationale in this file argues against — "returning a 422
+            beats silent nonsense".
 
-        `strict=True` KULLANILMADI: o mod int -> float dönüşümünü de reddederdi
-        ve `total_claim_amount: 55000` gibi tamamen geçerli bir JSON girdisi
-        kırılırdı. Yasak yalnızca `bool`a odaklı tutuldu.
+        `strict=True` WAS NOT USED: that mode would also reject int -> float
+        conversion and would break a perfectly valid JSON input such as
+        `total_claim_amount: 55000`. The ban is kept focused on `bool` alone.
         """
         if isinstance(value, bool):
             raise ValueError(
-                "boolean değer kabul edilmiyor; bu alan sayı ya da kategori bekler"
+                "boolean values are not accepted; this field expects a number or a category"
             )
         return value
 
-    # --- Poliçe / müşteri ------------------------------------------------- #
+    # --- Policy / customer ------------------------------------------------- #
 
-    # Eğitim: 0-479 ay. Fiziksel tavan olarak 1200 ay (=100 yıl) seçildi;
-    # bundan uzun bir müşteri ilişkisi veri giriş hatasıdır.
+    # Training: 0-479 months. 1200 months (=100 years) was chosen as the physical
+    # ceiling; a longer customer relationship is a data entry error.
     months_as_customer: Annotated[int, Field(ge=0, le=1200)] | None = None
 
-    # Eğitim: 20-64. Sınır 16 (birçok eyalette ehliyet alt sınırı) - 120
-    # (insan ömrü tavanı). 70 yaşındaki bir sigortalı geçerli bir girdidir;
-    # modelin onu görmemiş olması guardrail'in söyleyeceği ayrı bir şeydir.
+    # Training: 20-64. The bounds are 16 (the minimum driving age in many states)
+    # to 120 (the ceiling of a human lifespan). A 70-year-old policyholder is
+    # valid input; that the model has not seen one is a separate thing for the
+    # guardrail to say.
     age: Annotated[int, Field(ge=16, le=120)] | None = None
 
     policy_state: Literal["IL", "IN", "OH"] | None = None
 
     policy_csl: Literal["100/300", "250/500", "500/1000"] | None = None
 
-    # Eğitim: 500-2000. Muafiyet negatif olamaz; 100k makul bir üst tavan.
+    # Training: 500-2000. A deductible cannot be negative; 100k is a reasonable
+    # upper ceiling.
     policy_deductable: Annotated[float, Field(ge=0, le=100_000)] | None = None
 
-    # Eğitim: 433.33-2047.59. Prim negatif olamaz. Ondalıklı kabul edilir
-    # (kaynak kolon zaten float64).
+    # Training: 433.33-2047.59. A premium cannot be negative. Fractional values
+    # are accepted (the source column is already float64).
     policy_annual_premium: Annotated[float, Field(ge=0, le=100_000)] | None = None
 
-    # Eğitim aralığı -1.000.000 ile 10.000.000 arası. DİKKAT: eğitim verisinde
-    # NEGATİF umbrella_limit var (veri kalitesi sorunu). Alt sınırı 0 yapsaydık
-    # modelin eğitimde gördüğü değerleri 422 ile reddederdik — Pydantic sınırı
-    # eğitim aralığının ÜST KÜMESİ olmak zorunda.
+    # The training range runs from -1,000,000 to 10,000,000. NOTE: the training
+    # data contains NEGATIVE umbrella_limit values (a data quality problem). Had
+    # we set the lower bound to 0, we would reject with a 422 the very values the
+    # model saw in training — a Pydantic bound must be a SUPERSET of the training
+    # range.
     umbrella_limit: Annotated[float, Field(ge=-10_000_000, le=100_000_000)] | None = None
 
     insured_sex: Literal["FEMALE", "MALE"] | None = None
@@ -232,29 +245,30 @@ class PredictRequest(BaseModel):
         | None
     ) = None
 
-    # Eğitim: 0-100.500. Sermaye KAZANCI tanımı gereği negatif olamaz
-    # (zarar ayrı bir kolonda tutuluyor).
-    # `alias`: JSON anahtarı tireli (`capital-gains`) çünkü pipeline'ın kolon
-    # adı öyle; Python tarafında tire geçerli tanımlayıcı değil.
+    # Training: 0-100,500. Capital GAINS cannot be negative by definition (losses
+    # are held in a separate column).
+    # `alias`: the JSON key is hyphenated (`capital-gains`) because that is the
+    # pipeline's column name; a hyphen is not a valid Python identifier.
     capital_gains: Annotated[float, Field(ge=0, le=10_000_000)] | None = Field(
         default=None, alias="capital-gains"
     )
 
-    # Eğitim: -111.100 ile 0 arası. Bu veri setinde zarar NEGATİF işaretle
-    # kodlanır; pozitif bir değer işaret hatasıdır ve modele ters yönde
-    # sinyal verirdi. Bu yüzden `le=0` bilinçli bir mantıksal kısıttır.
+    # Training: -111,100 to 0. In this dataset a loss is encoded with a NEGATIVE
+    # sign; a positive value would be a sign error and would send the model a
+    # signal in the wrong direction. `le=0` is therefore a deliberate logical
+    # constraint.
     capital_loss: Annotated[float, Field(ge=-10_000_000, le=0)] | None = Field(
         default=None, alias="capital-loss"
     )
 
-    # --- Olay ------------------------------------------------------------- #
+    # --- Incident ---------------------------------------------------------- #
 
     incident_type: (
         Literal["Multi-vehicle Collision", "Parked Car", "Single Vehicle Collision", "Vehicle Theft"]
         | None
     ) = None
 
-    # "?" = kaynak sistemde bilinmiyor -> NaN -> pipeline imputer'ı (bkz. 4).
+    # "?" = unknown in the source system -> NaN -> the pipeline's imputer (see 4).
     collision_type: (
         Literal["Front Collision", "Rear Collision", "Side Collision", "?"] | None
     ) = None
@@ -280,35 +294,37 @@ class PredictRequest(BaseModel):
         | None
     ) = None
 
-    # İSTİSNA: burada fiziksel sınır eğitim aralığıyla (0-23) aynıdır, çünkü
-    # bir günün saati tanımı gereği 0-23'tür. Bu alanda sayısal OOD uyarısı
-    # hiç tetiklenemez; bu bir eksiklik değil, alanın doğası.
+    # EXCEPTION: here the physical bound is identical to the training range
+    # (0-23), because an hour of the day is 0-23 by definition. A numeric OOD
+    # warning can never fire on this field; that is not a gap but the nature of
+    # the field.
     incident_hour_of_the_day: Annotated[int, Field(ge=0, le=23)] | None = None
 
-    # Eğitim: 1-4. Zincirleme kazada çok daha fazlası mümkün; tavan 100.
+    # Training: 1-4. A pile-up can involve many more; the ceiling is 100.
     number_of_vehicles_involved: Annotated[int, Field(ge=1, le=100)] | None = None
 
     property_damage: Literal["NO", "YES", "?"] | None = None
 
-    # Eğitim: 0-2. Çok yaralılı kaza mümkün; tavan 20.
+    # Training: 0-2. An accident with many injuries is possible; ceiling 20.
     bodily_injuries: Annotated[int, Field(ge=0, le=20)] | None = None
 
-    # Eğitim: 0-3. 10'a kadar tanık makul; guardrail 3'ün üstünü uyarır.
+    # Training: 0-3. Up to 10 witnesses is plausible; the guardrail warns above 3.
     witnesses: Annotated[int, Field(ge=0, le=10)] | None = None
 
     police_report_available: Literal["NO", "YES", "?"] | None = None
 
-    # --- Tazminat kalemleri ------------------------------------------------ #
-    # Hepsi negatif olamaz (ödenen tutar). Tavan 10.000.000: eğitimdeki en
-    # yüksek talep ~115k, ama büyük ticari hasarlar bu mertebeye çıkabilir.
-    # Tutarlar float kabul edilir (kuruş/cent'li tutar gerçekçidir).
+    # --- Claim amounts ----------------------------------------------------- #
+    # None of these can be negative (they are amounts paid). The ceiling of
+    # 10,000,000 is generous: the largest claim in training is ~115k, but large
+    # commercial losses can reach that order. Amounts are accepted as floats
+    # (cents are realistic).
 
     total_claim_amount: Annotated[float, Field(ge=0, le=10_000_000)] | None = None
     injury_claim: Annotated[float, Field(ge=0, le=10_000_000)] | None = None
     property_claim: Annotated[float, Field(ge=0, le=10_000_000)] | None = None
     vehicle_claim: Annotated[float, Field(ge=0, le=10_000_000)] | None = None
 
-    # --- Araç / tarih türevleri -------------------------------------------- #
+    # --- Vehicle / date-derived fields ------------------------------------- #
 
     auto_make: (
         Literal[
@@ -330,113 +346,115 @@ class PredictRequest(BaseModel):
         | None
     ) = None
 
-    # Yıl alanlarının hepsinde 1900-2100: otomobilin/poliçenin var olabileceği
-    # makul takvim penceresi. Eğitim aralıkları çok daha dar
-    # (auto_year 1995-2015, policy_bind_year 1990-2015, incident_year sabit
-    # 2015) — aradaki fark bilerek bırakıldı, guardrail'in işi.
+    # All year fields use 1900-2100: a sensible calendar window in which a car or
+    # a policy could exist. The training ranges are far narrower (auto_year
+    # 1995-2015, policy_bind_year 1990-2015, incident_year fixed at 2015) — the
+    # gap is deliberate and is the guardrail's job.
     auto_year: Annotated[int, Field(ge=1900, le=2100)] | None = None
     incident_year: Annotated[int, Field(ge=1900, le=2100)] | None = None
     policy_bind_year: Annotated[int, Field(ge=1900, le=2100)] | None = None
 
 
 # --------------------------------------------------------------------------- #
-# /predict yanıtı
+# /predict response
 # --------------------------------------------------------------------------- #
 
 
 class ShapValue(BaseModel):
-    """Tek bir feature'ın SHAP katkısı — CLAUDE.md sözleşmesiyle birebir.
+    """One feature's SHAP contribution — exactly as in the CLAUDE.md contract.
 
-    `value` ve `base_value` LOG-ODDS (raw margin) uzayındadır, olasılık değil.
-    Toplamları modelin ham skorunu verir: sum(value) + base_value = raw margin,
-    sigmoid(raw margin) = fraud_probability. Frontend'in waterfall grafiği bu
-    toplanabilirlik sayesinde matematiksel olarak doğru çizilebilir.
+    `value` and `base_value` live in LOG-ODDS (raw margin) space, not probability.
+    They sum to the model's raw margin: sum(value) + base_value = raw margin, and
+    sigmoid(raw margin) = fraud_probability. That additivity is what lets the
+    frontend's waterfall chart be mathematically correct.
     """
 
-    feature: str = Field(description="Temiz feature adı (cat__/remainder__ öneki yok).")
-    value: float = Field(description="Bu feature'ın log-odds katkısı.")
-    base_value: float = Field(description="Modelin taban log-odds değeri (her elemanda aynı).")
+    feature: str = Field(description="Clean feature name (no cat__/remainder__ prefix).")
+    value: float = Field(description="This feature's log-odds contribution.")
+    base_value: float = Field(description="The model's base log-odds value (identical in every item).")
 
 
 class PredictResponse(BaseModel):
-    """`POST /predict` yanıtı — CLAUDE.md sözleşmesindeki 4 alan, fazlası yok.
+    """`POST /predict` response — the 4 fields of the CLAUDE.md contract, no more.
 
-    Bilinçli olarak EKSİK olanlar: girdinin yankılanması (echo), model
-    versiyonu, dahili id'ler. Yanıt ne kadar dar olursa sızıntı yüzeyi o kadar
-    küçük olur; sözleşmede olmayan hiçbir alan eklenmez.
+    DELIBERATELY ABSENT: any echo of the input, the model version, internal IDs.
+    The narrower the response, the smaller the leak surface; no field outside the
+    contract is ever added.
     """
 
     fraud_probability: float = Field(ge=0.0, le=1.0)
     risk_level: Literal["low", "medium", "high"]
     shap_values: list[ShapValue] = Field(
-        description="34 feature, abs(value) azalan sırada. Kaçının gösterileceğine frontend karar verir."
+        description="All 34 features, sorted by descending abs(value). The frontend decides how many to show."
     )
-    # FAZ 2 İÇİN KRİTİK NOT — GUARDRAIL YALNIZCA SAYISAL OOD ÜRETEBİLİR
-    # (Codex C-4). Kategorik alanlar `Literal` ile eğitimde görülen değerlere
-    # kapalı: bilinmeyen bir kategori guardrail'e HİÇ ULAŞMADAN 422 alır. Yani
-    # "eğitim dışı `policy_state` gönderdim, uyarı bekliyorum" senaryosu
-    # imkânsızdır — 422 döner.
+    # A CRITICAL NOTE FOR PHASE 2 — THE GUARDRAIL CAN ONLY PRODUCE NUMERIC OOD
+    # (Codex C-4). Categorical fields are closed with `Literal` to the values seen
+    # in training: an unknown category gets a 422 and NEVER REACHES the guardrail.
+    # So the scenario "I sent a `policy_state` outside the training set and expect
+    # a warning" is impossible — a 422 comes back instead.
     #
-    # Bu bilinçli ve doğru: `OrdinalEncoder` `unknown_value=-1` ile kurulu,
-    # bilinmeyen kategoriyi sessizce -1'e kodlayıp anlamsız ama "başarılı"
-    # görünen bir tahmin üretirdi (bkz. bu dosyanın girişindeki 2. madde).
-    # Ama alanın adı ve açıklaması bu sınırı gizlememeli: Faz 4'teki UI
-    # banner'ı "kategorik OOD uyarısı gelir" varsayımıyla yazılırsa sessizce
-    # yanlış olur.
+    # This is deliberate and correct: `OrdinalEncoder` is configured with
+    # `unknown_value=-1` and would silently encode an unknown category as -1,
+    # producing a meaningless but "successful"-looking prediction (see point 2 at
+    # the top of this file). But the field name and description must not hide that
+    # boundary: if the Phase 4 UI banner is written on the assumption that
+    # categorical OOD warnings arrive, it will be silently wrong.
     out_of_distribution_warnings: list[str] = Field(
         description=(
-            "Modelin eğitimde görmediği aralıkta kalan alan adları. Yalnızca "
-            "İSTEKTE GÖNDERİLEN sayısal alanlar kontrol edilir: verilmeyen alanlar "
-            "eğitim medyanı/moduyla doldurulduğu için tanım gereği aralık içindedir. "
-            "Kategorik alanlar burada görünmez — geçersiz bir kategori uyarı değil "
-            "422 üretir. Sıralama anlamlıdır: modelin gerçekten kullandığı alanlar "
-            "başta, hiç kullanmadıkları (feature_influence.has_influence=false) "
-            "sonda gelir. Uyarı tahmini engellemez; skor yine döner ve temkinli "
-            "okunmalıdır."
+            "Names of fields whose values fall outside the range the model saw in "
+            "training. Only numeric fields ACTUALLY SENT IN THE REQUEST are checked: "
+            "fields that were not supplied are filled with the training median/mode "
+            "and are therefore inside the range by definition. Categorical fields "
+            "never appear here — an invalid category produces a 422, not a warning. "
+            "The ordering is meaningful: fields the model actually uses come first, "
+            "and the ones it never uses (feature_influence.has_influence=false) come "
+            "last. A warning does not block the prediction; the score is still "
+            "returned and should be read with caution."
         )
     )
 
 
 # --------------------------------------------------------------------------- #
-# /health yanıtı
+# /health response
 # --------------------------------------------------------------------------- #
 
 
 class HealthResponse(BaseModel):
-    """Basit healthcheck.
+    """Simple healthcheck.
 
-    `protected_namespaces=()`: Pydantic v2 varsayılan olarak `model_` ile
-    başlayan alan adlarını kendi API'siyle çakışma riski diye uyarır. Bizim
-    alan adlarımız (`model_loaded`, `model_version`) metadata sözleşmesinden
-    geliyor; uyarıyı susturmak yerine namespace korumasını kapatıyoruz.
+    `protected_namespaces=()`: by default Pydantic v2 warns about field names
+    starting with `model_` because they may clash with its own API. Our field
+    names (`model_loaded`, `model_version`) come from the metadata contract, so
+    rather than muting the warning we turn the namespace protection off.
     """
 
     model_config = ConfigDict(protected_namespaces=())
 
     status: Literal["ok"]
-    # Sadece "süreç ayakta" değil "artefakt gerçekten yüklendi" bilgisi.
+    # Not just "the process is up" but "the artifact really loaded".
     model_loaded: bool
-    # Deploy sonrası "hangi artefakt koşuyor?" sorusunu tek istekle cevaplar.
+    # Answers "which artifact is running?" in a single request after a deploy.
     model_version: str
 
 
 # --------------------------------------------------------------------------- #
-# /model-info yanıtı — BEYAZ LİSTE PROJEKSİYONU
+# /model-info response — AN ALLOWLIST PROJECTION
 # --------------------------------------------------------------------------- #
 #
-# metadata.json OLDUĞU GİBİ DÖNDÜRÜLMEZ. Aşağıdaki modeller açık bir beyaz
-# liste kurar: her alt model yalnızca izin verilen alanları ilan eder ve
-# `extra="ignore"` sayesinde metadata'daki diğer her şey sessizce düşer.
+# metadata.json IS NOT RETURNED AS-IS. The models below establish an explicit
+# allowlist: each sub-model declares only the permitted fields, and thanks to
+# `extra="ignore"` everything else in the metadata is dropped silently.
 #
-# Neden beyaz liste, kara liste değil: yarın train_pipeline.py metadata'ya yeni
-# bir alan eklerse (ör. bir iç maliyet metriği), kara listede o alan otomatik
-# olarak public olurdu. Beyaz listede ise açıkça eklenene kadar dışarı çıkmaz.
+# Why an allowlist rather than a blocklist: if train_pipeline.py adds a new field
+# to the metadata tomorrow (an internal cost metric, say), a blocklist would make
+# that field public automatically. With an allowlist it stays in until someone
+# adds it explicitly.
 #
-# Dışarıda bırakılanlar ve gerekçeleri:
-#   preprocessing_contract -> implementasyon detayı; istemcinin işine yaramaz,
-#                             sadece iç mimariyi ifşa eder.
-#   model_params           -> hiperparametreler (n_estimators, learning_rate...).
-#   dataset.source_file    -> sunucu tarafındaki dosya adı; gereksiz.
+# What is left out, and why:
+#   preprocessing_contract -> an implementation detail; useless to a client and
+#                             it only exposes the internal architecture.
+#   model_params           -> hyperparameters (n_estimators, learning_rate, ...).
+#   dataset.source_file    -> a server-side filename; unnecessary.
 
 
 class MetricsInfo(BaseModel):
@@ -447,20 +465,22 @@ class MetricsInfo(BaseModel):
     metric_name: str
 
 
-# DİKKAT — AŞAĞIDAKİ AÇIKLAMALAR BİLİNÇLİ OLARAK DOCSTRING DEĞİL, YORUM:
-# Pydantic model docstring'leri OpenAPI şemasına `description` olarak girer ve
-# `/openapi.json` public bir yüzeydir. Beyaz listenin DIŞINDA bıraktığımız
-# metadata anahtarlarının adlarını docstring'de anmak, `/model-info`'dan
-# özenle çıkardığımız iç yapıyı arka kapıdan public şemaya taşırdı.
-# Kaynağı okuyan için eğitici değer aynı; OpenAPI için görünmez.
+# CAUTION — THE NOTES BELOW ARE DELIBERATELY COMMENTS, NOT DOCSTRINGS:
+# Pydantic model docstrings become the `description` in the OpenAPI schema, and
+# `/openapi.json` is a public surface. Naming the metadata keys we left OUT of the
+# allowlist inside a docstring would carry the internal structure we carefully
+# removed from `/model-info` back into the public schema through the back door.
+# The educational value for someone reading the source is the same; for OpenAPI
+# it is invisible.
 #
-#   DatasetInfo      -> metadata'daki kaynak dosya adı alanı BİLEREK yok;
-#                       sunucu tarafındaki dosya adı istemcinin işine yaramaz.
-#   FeatureListInfo  -> SHAP eşlemesi için kullanılan dönüştürülmüş kolon adı
-#                       listeleri beyaz listede YOK: onlar iç detaydır ve
-#                       `/predict` yanıtında zaten temiz adla görünürler.
+#   DatasetInfo      -> the metadata's source filename field is DELIBERATELY
+#                       absent; a server-side filename is of no use to a client.
+#   FeatureListInfo  -> the transformed column-name lists used for the SHAP
+#                       mapping are NOT in the allowlist: they are an internal
+#                       detail and already appear with clean names in the
+#                       `/predict` response.
 class DatasetInfo(BaseModel):
-    """Eğitim veri kümesinin boyut ve split bilgisi."""
+    """Size and split information for the training dataset."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -474,27 +494,28 @@ class DatasetInfo(BaseModel):
 
 
 class FeatureListInfo(BaseModel):
-    """Model card'ın feature bölümü."""
+    """The feature section of the model card."""
 
     model_config = ConfigDict(extra="ignore")
 
     pipeline_input_order: list[str]
     categorical_features: list[str]
     numeric_features: list[str]
-    # NOT: burada PII kolon ADLARI listelenir (policy_number, insured_zip,
-    # incident_location). Bu bir sızıntı DEĞİL, tersi: "bu alanlar modele hiç
-    # girmedi" beyanıdır. Sızıntı, PII *değerlerinin* dönmesi olurdu — model
-    # bu kolonları hiç görmediği için mümkün de değildir.
+    # NOTE: this lists PII column NAMES (policy_number, insured_zip,
+    # incident_location). That is not a leak but the opposite: a statement that
+    # "these fields never reached the model". A leak would be returning the PII
+    # *values* — which is impossible anyway, since the model never saw those
+    # columns.
     dropped_columns: list[str]
     target: str
 
 
 class TrainingRangeInfo(BaseModel):
-    """Guardrail'in (Faz 2) dayanacağı "eğitimde ne gördük" kaydı.
+    """The "what did we see in training" record the Phase 2 guardrail relies on.
 
-    Sayısal alanlarda min/max, kategorik alanlarda categories dolu gelir;
-    diğeri None kalır. `int | float` birleşimi tamsayı sınırların yanıtta
-    2015.0 gibi görünmesini engeller.
+    Numeric fields carry min/max, categorical fields carry categories; the other
+    stays None. The `int | float` union keeps integer bounds from appearing as
+    2015.0 in the response.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -507,10 +528,10 @@ class TrainingRangeInfo(BaseModel):
 
 
 class DefaultInfo(BaseModel):
-    """Verilmeyen alanlar için kullanılan medyan/mod değeri.
+    """The median/mode value used for fields that were not supplied.
 
-    Frontend bunu form placeholder'ı olarak gösterebilsin diye public: kullanıcı
-    "boş bıraktığım alan neyle dolduruldu?" sorusunun cevabını görebilmeli.
+    Public so the frontend can show it as a form placeholder: the user should be
+    able to see the answer to "what was the field I left blank filled in with?".
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -521,13 +542,13 @@ class DefaultInfo(BaseModel):
 
 
 class FeatureInfluenceEntry(BaseModel):
-    """Tek bir feature'ın eğitilmiş modeldeki ÖLÇÜLEN etkisi."""
+    """One feature's MEASURED influence in the trained model."""
 
     model_config = ConfigDict(extra="ignore")
 
-    split_count: int = Field(description="Ağaçlarda bu kolon üzerinde yapılan bölünme sayısı.")
-    gain: float = Field(description="Bu bölünmelerin toplam kazancı.")
-    has_influence: bool = Field(description="split_count > 0 — model bu feature'ı kullandı mı?")
+    split_count: int = Field(description="Number of splits made on this column across the trees.")
+    gain: float = Field(description="Total gain of those splits.")
+    has_influence: bool = Field(description="split_count > 0 — did the model use this feature?")
 
 
 class FeatureInfluenceSummary(BaseModel):
@@ -540,15 +561,15 @@ class FeatureInfluenceSummary(BaseModel):
 
 
 class FeatureInfluenceInfo(BaseModel):
-    """Hangi feature'ın tahmini gerçekten etkilediğinin ölçümü.
+    """A measurement of which features actually affect a prediction.
 
-    Faz 3'teki formun "bu alan modeli etkilemiyor" rozetini besler. Frontend'in
-    bu listeyi kendi içine gömmesi YASAK: model yeniden eğitilince liste
-    değişir ve gömülü kopya sessizce yalan söylemeye başlar. Tek doğruluk
-    kaynağı artefakt, tek dağıtım kanalı bu endpoint.
+    It feeds the "this field does not affect the model" badge on the Phase 3 form.
+    The frontend is FORBIDDEN from embedding this list: retraining the model
+    changes it, and an embedded copy would start lying silently. The artifact is
+    the single source of truth, and this endpoint the single distribution channel.
 
-    Anahtarlar API alan adlarıyla birebir aynıdır (`capital-gains` tireli
-    hâliyle), yani frontend ayrıca bir eşleme tablosu tutmaz.
+    The keys match the API field names exactly (`capital-gains` hyphenated), so
+    the frontend needs no additional mapping table.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -561,12 +582,12 @@ class FeatureInfluenceInfo(BaseModel):
 
 
 class FairnessAttributeInfo(BaseModel):
-    """Korunan/vekil nitelik — BEYAN ve ÖLÇÜM yan yana.
+    """A protected/proxy attribute — DECLARATION and MEASUREMENT side by side.
 
-    `used_as_model_feature` bir beyandır: feature modele verildi mi?
-    `has_influence` bir ölçümdür: eğitilmiş ağaçlar onu gerçekten kullandı mı?
-    İkisi farklı şeylerdir ve model card ikisini de göstermek zorundadır —
-    yalnızca beyanı göstermek okuyucuyu yanlış yönlendirir.
+    `used_as_model_feature` is a declaration: was the feature given to the model?
+    `has_influence` is a measurement: did the trained trees actually use it?
+    They are different things, and a model card has to show both — showing only
+    the declaration misleads the reader.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -574,27 +595,27 @@ class FairnessAttributeInfo(BaseModel):
     feature: str
     basis: str
     rationale: str
-    # BEYAN: feature modele girdi olarak verildi.
+    # DECLARATION: the feature was given to the model as an input.
     used_as_model_feature: bool
-    # ÖLÇÜM: booster'dan hesaplanır, elle yazılmaz.
+    # MEASUREMENT: computed from the booster, never hand-written.
     split_count: int
     has_influence: bool
-    # Yalnızca `protected_attributes_used_as_features` girdilerinde var.
+    # Present only on `protected_attributes_used_as_features` entries.
     severity: str | None = None
 
 
 class FairnessInfo(BaseModel):
-    """Model card'ın fairness bölümü — Faz 5 bunu tabloya basacak.
+    """The fairness section of the model card — Phase 5 renders this as a table.
 
-    Beyaz listede TUTULUYOR (K9). Modelin korunan nitelikleri feature olarak
-    kullandığını saklamak, bir demo için bile yanlış olurdu.
+    KEPT in the allowlist (K9). Hiding that the model uses protected attributes as
+    features would be wrong even for a demo.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     status: str
-    # "beyan" ile "ölçüm" alanlarının farkını okuyucuya anlatan metin;
-    # model card sayfası bunu olduğu gibi basacak.
+    # The text explaining the difference between "declaration" and "measurement"
+    # to the reader; the model card page prints it verbatim.
     field_semantics: str
     protected_attributes_used_as_features: list[FairnessAttributeInfo]
     proxy_risk_attributes: list[FairnessAttributeInfo]
@@ -606,10 +627,10 @@ class FairnessInfo(BaseModel):
 
 
 class RiskThresholdsInfo(BaseModel):
-    """`risk_level` etiketinin nasıl üretildiğinin açık beyanı.
+    """An explicit statement of how the `risk_level` label is produced.
 
-    Frontend eşikleri kendi kopyalamasın diye buradan okur; tek doğruluk
-    kaynağı `model.py`'daki sabitlerdir.
+    The frontend reads the thresholds from here rather than copying them; the
+    single source of truth is the constants in `model.py`.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -620,12 +641,12 @@ class RiskThresholdsInfo(BaseModel):
 
 
 class CalibrationInfo(BaseModel):
-    """Olasılıkların kalibre OLMADIĞININ açık uyarısı.
+    """An explicit warning that the probabilities are NOT calibrated.
 
-    Bunu model card'da söylemek zorunludur: model dengesiz sınıf ağırlığıyla
-    eğitildi, dolayısıyla `fraud_probability` "100 vakadan 71'i dolandırıcı"
-    anlamına GELMEZ. Sıralama (ranking) için güvenilir, mutlak olasılık olarak
-    değil. Bu uyarı olmadan bir sigorta müşterisi sayıyı yanlış okur.
+    Saying this on the model card is mandatory: the model was trained with an
+    imbalanced class weight, so `fraud_probability` does NOT mean "71 out of 100
+    such cases are fraudulent". It is reliable for ranking, not as an absolute
+    probability. Without this warning an insurance client will misread the number.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -636,7 +657,7 @@ class CalibrationInfo(BaseModel):
 
 
 class ModelInfoResponse(BaseModel):
-    """`GET /model-info` yanıtı — model card sayfasının (Faz 5) veri kaynağı."""
+    """`GET /model-info` response — the data source for the Phase 5 model card page."""
 
     model_config = ConfigDict(protected_namespaces=(), extra="ignore")
 

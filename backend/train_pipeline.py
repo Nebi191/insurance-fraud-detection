@@ -1,51 +1,55 @@
-"""Faz 0 — Pipeline konsolidasyonu.
+"""Phase 0 — pipeline consolidation.
 
-Bu script, notebook'lara dağılmış olan preprocessing (02_preprocessing_fe.ipynb)
-ve model eğitimi (03_lightgbm.ipynb) adımlarını TEK bir sklearn `Pipeline`
-içinde birleştirir ve iki artefakt üretir:
+This script merges the preprocessing (02_preprocessing_fe.ipynb) and model
+training (03_lightgbm.ipynb) steps that were scattered across notebooks into ONE
+sklearn `Pipeline`, and produces two artifacts:
 
-    backend/models/pipeline.pkl    -> preprocessor + model, tek dosya
+    backend/models/pipeline.pkl    -> preprocessor + model, a single file
     backend/models/metadata.json   -> defaults, training_ranges, metrics, versions
 
-Neden tek Pipeline?
-    Eski kurulumda `preprocessor.pkl` ve `best_model_lgb.pkl` ayrı dosyalardı ve
-    servis katmanı ikisini elle sırayla çağırmak zorundaydı. Bu, "transform'u
-    atlama" / "elle encoding sözlüğü yazma" hatalarına açık bir tasarım. Tek
-    Pipeline ile *imputasyon + encoding* modelin ayrılmaz parçası olarak taşınır:
-    çağıran taraf artık kendi encoding sözlüğünü yazamaz, yazmasına gerek de yok.
+Why a single Pipeline?
+    In the old setup `preprocessor.pkl` and `best_model_lgb.pkl` were separate
+    files and the serving layer had to call them by hand, in order. That is a
+    design wide open to "skipping the transform" and "writing a manual encoding
+    dictionary". With one Pipeline, *imputation + encoding* travel as an
+    inseparable part of the model: the caller can no longer write its own
+    encoding dictionary, and has no reason to.
 
-Pipeline'ın SINIRI (önemli — burayı yanlış okumak Faz 1'i bozar):
-    Pipeline HER ŞEYİ kapsamaz. `pipeline.predict_proba(df)` çağrısındaki `df`,
-    39 kolonluk HAM CSV satırı DEĞİL, `load_raw_frame()` temizliğinden geçmiş
-    34 kolonluk çerçevedir (`metadata.feature_list.pipeline_input_order`).
+The BOUNDARY of the Pipeline (important — misreading this breaks Phase 1):
+    The Pipeline does NOT cover everything. The `df` in
+    `pipeline.predict_proba(df)` is NOT a 39-column RAW CSV row but the
+    34-column frame that has been through `load_raw_frame()`
+    (`metadata.feature_list.pipeline_input_order`).
 
-    Pipeline'ın İÇİNDE (otomatik, çağıran hiçbir şey yapmaz):
-      - kategorik NaN imputasyonu (`SimpleImputer(strategy='most_frequent')`)
-      - kategorik -> sayısal encoding (`OrdinalEncoder`, bilinmeyen -> -1)
-      - sayısal kolonlar passthrough (LightGBM NaN'ı native olarak taşır)
+    INSIDE the Pipeline (automatic, the caller does nothing):
+      - categorical NaN imputation (`SimpleImputer(strategy='most_frequent')`)
+      - categorical -> numeric encoding (`OrdinalEncoder`, unknown -> -1)
+      - numeric columns pass through (LightGBM carries NaN natively)
 
-    Pipeline'ın DIŞINDA (`load_raw_frame()` içinde; API katmanı bunu KENDİSİ
-    yapmak zorunda). Bu adımlar `build_preprocessing_contract()` tarafından
-    makine-okunur biçimde `metadata.json -> preprocessing_contract` altına da
-    yazılır; Faz 1 dokümana değil o alana bakmalı:
-      1. `DROP_COLS` kolonlarını at (PII + ham tarihler + `_c39` + `auto_model`)
-      2. `incident_date` -> `incident_year`, `policy_bind_date` ->
-         `policy_bind_year` yıl türetmesi
-      3. `QUESTION_MARK_COLS` içinde `"?"` -> `NaN` normalizasyonu.
-         DİKKAT: Bunu API katmanı yapmazsa `"?"` string'i pipeline'a *geçerli
-         bir kategori* gibi girer; encoder onu bilinmeyen sayıp -1'e kodlar ve
-         imputer devreye GİRMEZ. Sessiz, sonucu bozan bir hata olur.
-      4. Kolonları `pipeline_input_order` sırasına getir
+    OUTSIDE the Pipeline (inside `load_raw_frame()`; the API layer must do this
+    ITSELF). These steps are also written machine-readably under
+    `metadata.json -> preprocessing_contract` by `build_preprocessing_contract()`;
+    Phase 1 should look at that field, not at documentation:
+      1. Drop the `DROP_COLS` columns (PII + raw dates + `_c39` + `auto_model`)
+      2. Derive `incident_date` -> `incident_year` and `policy_bind_date` ->
+         `policy_bind_year`
+      3. Normalise `"?"` -> `NaN` in `QUESTION_MARK_COLS`.
+         CAUTION: if the API layer skips this, the `"?"` string enters the
+         pipeline as a *valid category*; the encoder treats it as unknown and
+         encodes it to -1, and the imputer NEVER runs. A silent, result-breaking
+         bug.
+      4. Put the columns into `pipeline_input_order`
 
-    Yani Faz 1'deki `model.py` "pkl'i yükle, request'i doğrudan ver" diyemez;
-    yukarıdaki 4 adımı uygulayan ince bir hazırlık katmanı yazmak zorundadır.
-    Bu katman ENCODING YAPMAZ (o hâlâ yasak) — sadece şema normalizasyonu yapar.
+    So `model.py` in Phase 1 cannot simply say "load the pkl and hand it the
+    request"; it has to write a thin preparation layer that applies the four
+    steps above. That layer DOES NO ENCODING (still forbidden) — it only performs
+    schema normalisation.
 
-Kritik: Pipeline HAM (temizlenmiş ama transform EDİLMEMİŞ) X_train üzerinde fit
-edilir. Önceden transform edilmiş bir matris üzerinde fit etmek, preprocessor'ı
-pipeline'ın dışında bırakır ve konsolidasyonun bütün amacını boşa çıkarır.
+Critical: the Pipeline is fitted on RAW (cleaned but NOT transformed) X_train.
+Fitting on an already-transformed matrix would leave the preprocessor outside the
+pipeline and defeat the entire purpose of the consolidation.
 
-Kullanım:
+Usage:
     python backend/train_pipeline.py
     python backend/train_pipeline.py --data path/to/insurance_claims.csv
 """
@@ -74,7 +78,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OrdinalEncoder
 
 # --------------------------------------------------------------------------- #
-# Sabitler — notebook 02 & 03 ile birebir aynı tutuldu.
+# Constants — kept identical to notebooks 02 & 03.
 # --------------------------------------------------------------------------- #
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -85,13 +89,13 @@ DEFAULT_OUTPUT_DIR = BACKEND_DIR / "models"
 TARGET = "fraud_reported"
 TARGET_MAP = {"Y": 1, "N": 0}
 
-# PII + model için anlamsız / sızıntı riski taşıyan kolonlar.
-# `policy_number`, `insured_zip`, `incident_location` doğrudan PII'dır ve
-# BURADA drop edildikleri için defaults/metadata'ya da hiç girmezler.
-# `incident_date` / `policy_bind_date` ham hâlleriyle drop edilir; bilgileri
-# aşağıda `incident_year` / `policy_bind_year` olarak korunur.
-# `_c39` Kaggle CSV'sindeki boş artık kolondur (bazı kopyalarda hiç yok).
-# `auto_model` yüksek kardinaliteli ve `auto_make` ile büyük ölçüde eş anlamlı.
+# PII plus columns that are meaningless to the model or carry leakage risk.
+# `policy_number`, `insured_zip` and `incident_location` are direct PII, and
+# because they are dropped HERE they never enter defaults/metadata either.
+# `incident_date` / `policy_bind_date` are dropped in their raw form; their
+# information is preserved below as `incident_year` / `policy_bind_year`.
+# `_c39` is the empty trailing column in the Kaggle CSV (absent in some copies).
+# `auto_model` is high cardinality and largely synonymous with `auto_make`.
 DROP_COLS = [
     "policy_number",
     "insured_zip",
@@ -102,22 +106,22 @@ DROP_COLS = [
     "auto_model",
 ]
 
-# Ham tarih kolonlarından türetilen yıl feature'ları. Türetme Pipeline'ın
-# DIŞINDA (load_raw_frame) yapılır; API katmanı da aynısını yapmak zorunda.
+# Year features derived from the raw date columns. The derivation happens OUTSIDE
+# the Pipeline (in load_raw_frame); the API layer has to do exactly the same.
 DATE_YEAR_FEATURES = {
     "incident_date": "incident_year",
     "policy_bind_date": "policy_bind_year",
 }
 
-# Bu kolonlarda eksik değer "?" string'i olarak kodlanmış.
+# In these columns, missing values are encoded as the "?" string.
 QUESTION_MARK_COLS = ["property_damage", "police_report_available", "collision_type"]
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
 
-# Optuna (notebook 03) tarafından bulunan en iyi parametreler. Faz 0 bir
-# konsolidasyon fazıdır, modelleme fazı değil: HPO yeniden koşulmaz, bilinen
-# en iyi parametrelerle deterministik refit yapılır.
+# The best parameters found by Optuna (notebook 03). Phase 0 is a consolidation
+# phase, not a modelling phase: HPO is not re-run; we do a deterministic refit
+# with the known-best parameters.
 LGBM_PARAMS = {
     "n_estimators": 173,
     "learning_rate": 0.010634,
@@ -129,27 +133,26 @@ LGBM_PARAMS = {
 
 
 # --------------------------------------------------------------------------- #
-# Fairness / model card — korunan özellikler
+# Fairness / model card — protected attributes
 # --------------------------------------------------------------------------- #
 #
-# Bu blok BİLİNÇLİ bir ürün kararının kaydıdır: model bu feature'larla eğitildi
-# ve öyle kalıyor (yeniden eğitim yok). Ama sigorta/fintech bağlamında korunan
-# nitelikle karar vermek düzenlemeye tabidir; artefaktın kendisi bunu sessizce
-# taşımak yerine açıkça beyan eder.
+# This block is the record of a DELIBERATE product decision: the model was
+# trained with these features and stays that way (no retraining). But in an
+# insurance/fintech context, deciding on the basis of a protected attribute is
+# regulated; rather than carrying that silently, the artifact declares it openly.
 #
-# Serbest metin değil YAPILANDIRILMIŞ veri: Faz 5'teki model card sayfası bunu
-# `GET /model-info` üzerinden okuyup tabloya basacak.
+# STRUCTURED data, not free text: the Phase 5 model card page reads this through
+# `GET /model-info` and renders it as a table.
 
-# Doğrudan korunan/hassas nitelikler (model feature'ı olarak KULLANILIYOR).
+# Directly protected/sensitive attributes (USED as model features).
 PROTECTED_ATTRIBUTES = [
     {
         "feature": "insured_sex",
         "basis": "sex",
         "severity": "high",
         "rationale": (
-            "Cinsiyet, çoğu yargı bölgesinde doğrudan korunan niteliktir. Model "
-            "feature'ı olarak kullanılıyor; dolandırıcılık skoru cinsiyete göre "
-            "değişebilir."
+            "Sex is a directly protected attribute in most jurisdictions. It is "
+            "used as a model feature, so the fraud score can vary with sex."
         ),
     },
     {
@@ -157,9 +160,9 @@ PROTECTED_ATTRIBUTES = [
         "basis": "age",
         "severity": "high",
         "rationale": (
-            "Yaş korunan niteliktir. Sigorta fiyatlamasında bazı yargı "
-            "bölgelerinde aktüeryal gerekçeyle izinli olabilir, ancak "
-            "dolandırıcılık *şüphesi* skorlamasında aynı muafiyet varsayılamaz."
+            "Age is a protected attribute. Some jurisdictions permit its use in "
+            "insurance pricing on actuarial grounds, but the same exemption "
+            "cannot be assumed for scoring the *suspicion* of fraud."
         ),
     },
     {
@@ -167,9 +170,9 @@ PROTECTED_ATTRIBUTES = [
         "basis": "marital_and_familial_status",
         "severity": "medium",
         "rationale": (
-            "Değerler (husband/wife/unmarried/own-child/...) medeni ve ailevi "
-            "durumu doğrudan açık eder; bu birçok yargı bölgesinde korunan "
-            "niteliktir. Ayrıca cinsiyet için güçlü bir vekildir "
+            "The values (husband/wife/unmarried/own-child/...) directly disclose "
+            "marital and familial status, which is a protected attribute in many "
+            "jurisdictions. It is also a strong proxy for sex "
             "(husband/wife -> insured_sex)."
         ),
     },
@@ -178,77 +181,79 @@ PROTECTED_ATTRIBUTES = [
         "basis": "socioeconomic_proxy",
         "severity": "medium",
         "rationale": (
-            "Klasik anlamda korunan sınıf değil, ancak sosyoekonomik köken ve "
-            "dolaylı olarak ırk/ulusal köken için iyi belgelenmiş bir vekildir. "
-            "Ayrımcılık denetiminde vekil değişken olarak ele alınmalıdır."
+            "Not a protected class in the classic sense, but a well-documented "
+            "proxy for socioeconomic background and, indirectly, race/national "
+            "origin. It should be treated as a proxy variable in a discrimination "
+            "audit."
         ),
     },
 ]
 
-# Doğrudan korunan nitelik değil ama denetimde vekil (proxy) riski taşıyanlar.
+# Not directly protected attributes, but carrying proxy risk in an audit.
 PROXY_RISK_ATTRIBUTES = [
     {
         "feature": "insured_occupation",
         "basis": "socioeconomic_proxy",
-        "rationale": "Meslek; gelir, eğitim ve demografi için güçlü vekildir.",
+        "rationale": "Occupation is a strong proxy for income, education and demographics.",
     },
     {
         "feature": "insured_hobbies",
         "basis": "lifestyle_proxy",
         "rationale": (
-            "SHAP'ta yüksek etkili çıkıyor; yaşam tarzı/kültürel köken vekili "
-            "olabilir ve nedensel bir dolandırıcılık gerekçesi yoktur."
+            "It shows high influence in SHAP; it may proxy lifestyle or cultural "
+            "background, and there is no causal fraud rationale behind it."
         ),
     },
     {
         "feature": "policy_state",
         "basis": "geographic_proxy",
-        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "rationale": "Geographic features carry a redlining-like indirect discrimination risk.",
     },
     {
         "feature": "incident_state",
         "basis": "geographic_proxy",
-        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "rationale": "Geographic features carry a redlining-like indirect discrimination risk.",
     },
     {
         "feature": "incident_city",
         "basis": "geographic_proxy",
-        "rationale": "Coğrafi feature'lar redlining benzeri dolaylı ayrımcılık riski taşır.",
+        "rationale": "Geographic features carry a redlining-like indirect discrimination risk.",
     },
 ]
 
 
 def build_feature_influence(fitted_pipeline: Pipeline, display_names: list[str]) -> dict:
-    """Her feature'ın eğitilmiş modeldeki ÖLÇÜLEN etkisi.
+    """Each feature's MEASURED influence in the trained model.
 
-    NEDEN METADATA'DA, RUNTIME'DA DEĞİL:
-    Split/gain sayıları eğitim anının olgusudur — eğitilmiş ağaçlar sabittir,
-    bu sayılar her istekte yeniden hesaplanacak bir şey değil. Doğru evleri
-    artefaktın yanı. Runtime'da hesaplamak hem israf hem de "hangi modelin
-    sayısı?" belirsizliği yaratırdı.
+    WHY IN THE METADATA AND NOT AT RUNTIME:
+    Split/gain counts are a fact about the moment of training — the trained trees
+    are fixed, and these numbers are not something to recompute on every request.
+    Their proper home is next to the artifact. Computing them at runtime would be
+    both wasteful and ambiguous ("which model's numbers?").
 
-    NEDEN ÖNEMLİ:
-    Bir feature'ı modele VERMEK ile modelin onu KULLANMASI aynı şey değildir.
-    LightGBM eğitim sırasında bir kolonda hiç bölünme yapmamışsa (`split_count`
-    = 0) o kolon tahmini hiç etkilemez ve SHAP katkısı her zaman tam 0.0'dır.
-    Bu ayrım hem ürün (kullanıcı formda bir alanı değiştirip sonucun
-    kıpırdamadığını görüyor) hem de fairness beyanı açısından kritik.
+    WHY IT MATTERS:
+    GIVING a feature to the model is not the same as the model USING it. If
+    LightGBM never split on a column during training (`split_count` = 0), that
+    column cannot affect any prediction and its SHAP contribution is always
+    exactly 0.0. That distinction is critical both for the product (the user
+    changes a form field and sees the result not move) and for the fairness
+    declaration.
 
-    ANAHTARLAR API ALAN ADLARIDIR:
-    `display_names` zaten `cat__`/`remainder__` öneki atılmış hâldir, yani
-    `capital-gains` tireli hâliyle gelir — API şemasındaki alan adının ta
-    kendisi. Frontend'in ayrıca bir eşleme tablosu tutması gerekmez.
+    THE KEYS ARE API FIELD NAMES:
+    `display_names` already has the `cat__`/`remainder__` prefix stripped, so
+    `capital-gains` arrives hyphenated — exactly the field name in the API schema.
+    The frontend needs no additional mapping table.
     """
     booster = fitted_pipeline.named_steps["model"].booster_
 
-    # Booster'ın kendi feature adları ile bizim temiz adlarımız POZİSYON
-    # bazında eşleşmek zorunda; eşleşmezse bütün sayılar yanlış feature'a
-    # yazılırdı ve bu sessiz bir hata olurdu.
+    # The booster's own feature names and our clean names must correspond BY
+    # POSITION; if they did not, every number would be written against the wrong
+    # feature, and that would be a silent bug.
     booster_names = [name.split("__", 1)[-1] for name in booster.feature_name()]
     if booster_names != list(display_names):
         raise ValueError(
-            "Booster feature adları transformed_display_names ile eşleşmiyor; "
-            "etki sayıları yanlış feature'lara yazılırdı."
+            "Booster feature names do not match transformed_display_names; the "
+            "influence counts would be written against the wrong features."
         )
 
     split_counts = booster.feature_importance(importance_type="split")
@@ -260,7 +265,7 @@ def build_feature_influence(fitted_pipeline: Pipeline, display_names: list[str])
         features[name] = {
             "split_count": split_count,
             "gain": float(gain),
-            # Tanım: eğitilmiş ağaçlar bu kolonda en az bir kez bölündü mü?
+            # Definition: did the trained trees split on this column at least once?
             "has_influence": split_count > 0,
         }
 
@@ -268,17 +273,18 @@ def build_feature_influence(fitted_pipeline: Pipeline, display_names: list[str])
 
     return {
         "description": (
-            "Eğitilmiş LightGBM booster'ından ölçülen feature etkisi. "
-            "split_count = ağaçlarda bu kolon üzerinde yapılan bölünme sayısı, "
-            "gain = bu bölünmelerin toplam kazancı, has_influence = split_count > 0."
+            "Feature influence measured from the trained LightGBM booster. "
+            "split_count = the number of splits made on this column across the "
+            "trees, gain = the total gain of those splits, has_influence = "
+            "split_count > 0."
         ),
         "measured_from": "lightgbm booster_.feature_importance(importance_type='split'|'gain')",
         "interpretation_note": (
-            "has_influence=false olan bir feature bu EĞİTİLMİŞ modelde hiçbir "
-            "tahmini etkilemez; SHAP katkısı her zaman tam 0.0'dır. Bu, "
-            "feature'ın modele verilmediği anlamına GELMEZ — verildi, ağaçlar "
-            "kullanmadı. Model yeniden eğitilirse (farklı veri, farklı seed, "
-            "farklı hiperparametre) bu liste değişebilir."
+            "A feature with has_influence=false cannot affect any prediction in "
+            "THIS TRAINED model; its SHAP contribution is always exactly 0.0. "
+            "That does NOT mean the feature was withheld from the model — it was "
+            "given, and the trees did not use it. If the model is retrained "
+            "(different data, seed or hyperparameters) this list may change."
         ),
         "summary": {
             "n_features": len(features),
@@ -293,31 +299,32 @@ def build_feature_influence(fitted_pipeline: Pipeline, display_names: list[str])
 def build_fairness_section(
     cat_cols: list[str], num_cols: list[str], feature_influence: dict
 ) -> dict:
-    """Model card'ın makine-okunur fairness bölümü.
+    """The machine-readable fairness section of the model card.
 
-    Feature adları eğitimde gerçekten kullanılan kolon listesine karşı
-    doğrulanır: metadata'nın modelde olmayan bir feature'ı "korunan nitelik"
-    diye ilan etmesi (ya da tersi) sessizce eskimesin.
+    Feature names are validated against the list of columns actually used in
+    training, so the metadata cannot go stale by declaring a "protected attribute"
+    the model does not have (or the other way round).
 
-    BEYAN İLE ÖLÇÜM AYRIŞTIRILDI:
-    Eskiden bu bölümde yalnızca `used_as_model_feature: true` vardı. Teknik
-    olarak doğru ama okuyucuyu yanlış yönlendiriyordu: model card "cinsiyet
-    skoru etkileyebilir" derken, ölçüm "eğitilmiş ağaçlar bu kolonda hiç
-    bölünme yapmamış" diyordu. Artık iki alan yan yana duruyor:
+    DECLARATION AND MEASUREMENT ARE SEPARATED:
+    This section used to carry only `used_as_model_feature: true`. Technically
+    correct, but it misled the reader: the model card said "sex can affect the
+    score" while the measurement said "the trained trees never split on that
+    column". Now the two fields sit side by side:
 
-        used_as_model_feature -> feature modele VERİLDİ (beyan)
-        has_influence         -> eğitilmiş ağaçlar onu KULLANDI (ölçüm)
+        used_as_model_feature -> the feature was GIVEN to the model (declaration)
+        has_influence         -> the trained trees USED it (measurement)
 
-    Sayılar `feature_influence`'tan gelir, yani booster'dan hesaplanır; elle
-    yazılmış sabit değildir ve model değişince kendiliğinden güncellenir.
+    The numbers come from `feature_influence`, i.e. they are computed from the
+    booster; they are not hand-written constants and they update by themselves
+    when the model changes.
     """
     model_features = set(cat_cols) | set(num_cols)
 
     for entry in (*PROTECTED_ATTRIBUTES, *PROXY_RISK_ATTRIBUTES):
         if entry["feature"] not in model_features:
             raise ValueError(
-                f"Fairness bildiriminde '{entry['feature']}' var ama model "
-                "feature'ları arasında yok. Liste eğitimle senkron değil."
+                f"The fairness declaration lists '{entry['feature']}' but it is not "
+                "among the model features. The list is out of sync with training."
             )
 
     measured = feature_influence["features"]
@@ -326,9 +333,9 @@ def build_fairness_section(
         influence = measured[entry["feature"]]
         return {
             **entry,
-            # BEYAN: feature modele girdi olarak verildi.
+            # DECLARATION: the feature was given to the model as an input.
             "used_as_model_feature": True,
-            # ÖLÇÜM: eğitilmiş modelde gerçekten kullanıldı mı?
+            # MEASUREMENT: was it actually used by the trained model?
             "split_count": influence["split_count"],
             "has_influence": influence["has_influence"],
         }
@@ -336,14 +343,16 @@ def build_fairness_section(
     return {
         "status": "declared_not_audited",
         "field_semantics": (
-            "used_as_model_feature = feature modele VERİLDİ. "
-            "has_influence = eğitilmiş ağaçlar bu kolonda gerçekten bölünme yaptı. "
-            "İKİSİ AYNI ŞEY DEĞİLDİR: split_count=0 olan bir feature bu eğitilmiş "
-            "modelde hiçbir tahmini etkilemez ve SHAP katkısı her zaman tam 0.0'dır. "
-            "Bu ölçüm bir FAIRNESS DENETİMİ YERİNE GEÇMEZ: (1) model yeniden "
-            "eğitilirse sonuç değişebilir, (2) vekil feature'lar (meslek, hobi, "
-            "coğrafya) aynı sinyali dolaylı olarak geri taşıyabilir, (3) etkisi "
-            "sıfır olmayan nitelikler için hiçbir grup bazlı metrik hesaplanmadı."
+            "used_as_model_feature = the feature was GIVEN to the model. "
+            "has_influence = the trained trees actually split on this column. "
+            "THESE ARE NOT THE SAME THING: a feature with split_count=0 cannot "
+            "affect any prediction in this trained model, and its SHAP "
+            "contribution is always exactly 0.0. This measurement IS NOT A "
+            "SUBSTITUTE FOR A FAIRNESS AUDIT: (1) the result can change if the "
+            "model is retrained, (2) proxy features (occupation, hobbies, "
+            "geography) can carry the same signal back indirectly, (3) no "
+            "group-level metric was computed for the attributes whose influence is "
+            "not zero."
         ),
         "protected_attributes_used_as_features": [
             with_measurement(entry) for entry in PROTECTED_ATTRIBUTES
@@ -354,122 +363,129 @@ def build_fairness_section(
         "intended_use": "demo_and_portfolio_only",
         "production_requirements": [
             (
-                "Korunan nitelik başına grup bazlı fairness denetimi koş (ör. demografik "
-                "parite farkı, eşitlenmiş fırsat / TPR-FPR farkı, kalibrasyon farkı)."
+                "Run a group-level fairness audit per protected attribute (e.g. "
+                "demographic parity difference, equalised odds / TPR-FPR gap, "
+                "calibration gap)."
             ),
             (
-                "Korunan niteliği düşürmenin ayrımcılığı gerçekten azaltıp azaltmadığını "
-                "ölç: vekil feature'lar (meslek, hobi, coğrafya) sinyali geri taşıyabilir."
+                "Measure whether dropping a protected attribute actually reduces "
+                "discrimination: proxy features (occupation, hobbies, geography) can "
+                "carry the signal back."
             ),
             (
-                "İnsan gözden geçirmesi zorunlu: model çıktısı bir talebi tek başına "
-                "reddetmek için değil, önceliklendirme/triyaj için kullanılmalı."
+                "Human review is mandatory: model output must be used for "
+                "prioritisation/triage, never to decline a claim on its own."
             ),
             (
-                "Yerel düzenlemeyle uyumu doğrula (ör. AB AI Act yüksek riskli sistem "
-                "yükümlülükleri, ABD eyalet sigorta ayrımcılık mevzuatı)."
+                "Verify compliance with local regulation (e.g. EU AI Act high-risk "
+                "system obligations, US state insurance anti-discrimination law)."
             ),
         ],
         "notes": (
-            "Model bu feature'larla eğitildi ve Faz 0'da bilinçli olarak öyle "
-            "bırakıldı: amaç yayınlanan modeli SADIK biçimde yeniden üretmekti. "
-            "Bu bölüm bir uyumluluk beyanı değil, bilinen riskin açık kaydıdır.\n\n"
-            "ÖLÇÜM NOTU: bu eğitilmiş modelde bazı korunan/vekil niteliklerin "
-            "split_count değeri 0'dır, yani ölçülen etkileri sıfırdır (her SHAP "
-            "katkısı tam 0.0). Bu, modelin adil olduğu ya da ilgili nitelikle "
-            "ayrımcılık yapmadığı ANLAMINA GELMEZ. Söylenebilecek tek şey, bu "
-            "feature'ların bu spesifik eğitilmiş ağaç kümesindeki ölçülen "
-            "etkisinin sıfır olduğudur. Etkisi sıfır olmayan nitelikler için "
-            "hiçbir grup bazlı fairness metriği hesaplanmadı; audit_performed "
-            "hâlâ false ve aşağıdaki production_requirements maddeleri aynen "
-            "geçerlidir."
+            "The model was trained with these features and Phase 0 deliberately "
+            "left it that way: the goal was to reproduce the published model "
+            "FAITHFULLY. This section is not a compliance statement but an open "
+            "record of a known risk.\n\n"
+            "MEASUREMENT NOTE: in this trained model some protected/proxy "
+            "attributes have a split_count of 0, meaning their measured influence "
+            "is zero (every SHAP contribution is exactly 0.0). That DOES NOT MEAN "
+            "the model is fair, or that it does not discriminate on the attribute "
+            "in question. The only thing that can be said is that the measured "
+            "influence of those features in this specific set of trained trees is "
+            "zero. No group-level fairness metric was computed for the attributes "
+            "whose influence is not zero; audit_performed is still false and the "
+            "production_requirements items below apply in full."
         ),
     }
 
 
 def build_preprocessing_contract(pipeline_input_order: list[str]) -> dict:
-    """Pipeline'ın DIŞINDA kalan hazırlığın makine-okunur sözleşmesi.
+    """The machine-readable contract for the preparation left OUTSIDE the Pipeline.
 
-    Faz 1'de `model.py` bu adımları uygulamak zorunda; metadata'ya yazılması,
-    "pipeline her şeyi hallediyor" yanılgısını artefakt seviyesinde kapatır.
-    Kod sabitlerinden türetilir (elle yazılmaz) ki koddan asla ayrışmasın.
+    In Phase 1 `model.py` has to apply these steps; writing them into the metadata
+    closes the "the pipeline handles everything" misconception at the artifact
+    level. It is derived from the code constants (never hand-written) so it can
+    never drift from the code.
     """
     return {
         "summary": (
-            "pipeline.pkl imputasyon ve encoding'i kapsar; ham CSV şemasından "
-            "pipeline girdisine geçişi KAPSAMAZ. Çağıran (API katmanı) aşağıdaki "
-            "adımları pipeline'a vermeden ÖNCE uygulamak zorundadır."
+            "pipeline.pkl covers imputation and encoding; it DOES NOT cover the "
+            "step from the raw CSV schema to the pipeline input. The caller (the "
+            "API layer) must apply the steps below BEFORE handing anything to the "
+            "pipeline."
         ),
         "inside_pipeline": [
             "categorical_imputation: SimpleImputer(strategy='most_frequent')",
             "categorical_encoding: OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)",
-            "numeric_passthrough: imputasyon yok, LightGBM NaN'ı native taşır",
+            "numeric_passthrough: no imputation, LightGBM carries NaN natively",
         ],
         "caller_must_apply_before_predict": [
             {
                 "step": "drop_columns",
                 "columns": DROP_COLS,
-                "reason": "PII, ham tarihler, boş artık kolon ve yüksek kardinaliteli auto_model.",
+                "reason": "PII, raw dates, the empty trailing column and the high-cardinality auto_model.",
             },
             {
                 "step": "derive_year_features",
                 "mapping": dict(DATE_YEAR_FEATURES),
-                "reason": "Pipeline tarih parse etmez; yıl feature'ı dışarıda türetilir.",
+                "reason": "The pipeline does not parse dates; the year feature is derived outside it.",
             },
             {
                 "step": "question_mark_to_nan",
                 "columns": QUESTION_MARK_COLS,
                 "reason": (
-                    "Bu kolonlarda eksik değer '?' string'i olarak kodlanmış. "
-                    "Dönüştürülmezse encoder '?' değerini bilinmeyen kategori sayıp "
-                    "-1'e kodlar ve imputer devreye girmez -> sessiz hatalı tahmin."
+                    "In these columns a missing value is encoded as the '?' string. "
+                    "Without the conversion, the encoder treats '?' as an unknown "
+                    "category and encodes it to -1, and the imputer never runs -> a "
+                    "silently wrong prediction."
                 ),
             },
             {
                 "step": "order_columns",
                 "columns": pipeline_input_order,
-                "reason": "Pipeline girdisi bu kolon adlarını ve sırasını bekler.",
+                "reason": "The pipeline input expects these column names in this order.",
             },
         ],
         "note_on_encoding_ban": (
-            "Bu adımlar ŞEMA NORMALİZASYONUDUR, encoding değildir. Kategorik "
-            "değerleri sayıya çevirmek hâlâ yalnızca pipeline'ın işidir."
+            "These steps are SCHEMA NORMALISATION, not encoding. Turning "
+            "categorical values into numbers remains the pipeline's job alone."
         ),
     }
 
 
 # --------------------------------------------------------------------------- #
-# Veri hazırlığı
+# Data preparation
 # --------------------------------------------------------------------------- #
 
 
 def load_raw_frame(csv_path: Path) -> pd.DataFrame:
-    """Ham CSV'yi okur ve notebook 02'deki temizliği uygular.
+    """Reads the raw CSV and applies the cleaning from notebook 02.
 
-    DİKKAT: Notebook 02'de tasarlanan feature engineering (`vehicle_age`,
-    `injury_ratio` vb.) burada YOKTUR — o kod bir markdown hücresinde kalmış,
-    hiçbir zaman çalışmamıştı; yayınlanan model onlarsız eğitildi. Faz 0 o
-    modeli SADIK biçimde yeniden üretir, yeni feature EKLEMEZ.
+    CAUTION: the feature engineering designed in notebook 02 (`vehicle_age`,
+    `injury_ratio` etc.) is NOT here — that code stayed in a markdown cell and
+    never ran; the published model was trained without it. Phase 0 reproduces that
+    model FAITHFULLY; it ADDS no new features.
 
-    Tek istisna `incident_year` / `policy_bind_year`: bunlar yeni bilgi değil,
-    ham tarih kolonlarının modele verilebilir hâlidir ve orijinal eğitimde de
-    vardı. (Not: `incident_year` bu veri setinde sabittir — tüm satırlar 2015 —
-    yani modele bilgi katmaz; Faz 2 guardrail'i bunu hesaba katmalı.)
+    The one exception is `incident_year` / `policy_bind_year`: those are not new
+    information but the model-ready form of the raw date columns, and they were
+    present in the original training too. (Note: `incident_year` is constant in
+    this dataset — every row is 2015 — so it adds no information to the model; the
+    Phase 2 guardrail has to take that into account.)
 
-    Bu fonksiyonun tamamı Pipeline'ın DIŞINDADIR; API katmanı aynı adımları
-    uygulamak zorunda (bkz. modül docstring'i + `build_preprocessing_contract`).
+    This entire function lives OUTSIDE the Pipeline; the API layer has to apply
+    the same steps (see the module docstring + `build_preprocessing_contract`).
     """
     df = pd.read_csv(csv_path)
 
-    # Tarih kolonlarından yıl türet, sonra ham tarihleri drop et.
-    # Bunlar ZORUNLU: yoksa `incident_year`/`policy_bind_year` üretilemez ve
-    # pipeline eksik kolonla çağrılır. Çıplak `KeyError` yerine hangi kolonun
-    # eksik olduğunu söyleyen bir hata veriyoruz.
+    # Derive the year from the date columns, then drop the raw dates.
+    # These are MANDATORY: without them `incident_year`/`policy_bind_year` cannot
+    # be produced and the pipeline is called with a missing column. Instead of a
+    # bare `KeyError` we raise an error that names the missing column.
     missing_dates = [c for c in DATE_YEAR_FEATURES if c not in df.columns]
     if missing_dates:
         raise ValueError(
-            f"CSV'de zorunlu tarih kolon(lar)ı yok: {missing_dates}. "
-            f"Bunlardan {[DATE_YEAR_FEATURES[c] for c in missing_dates]} türetiliyor."
+            f"Mandatory date column(s) missing from the CSV: {missing_dates}. "
+            f"{[DATE_YEAR_FEATURES[c] for c in missing_dates]} are derived from them."
         )
     for date_col, year_col in DATE_YEAR_FEATURES.items():
         df[year_col] = pd.to_datetime(df[date_col]).dt.year
@@ -477,38 +493,39 @@ def load_raw_frame(csv_path: Path) -> pd.DataFrame:
     present = [c for c in DROP_COLS if c in df.columns]
     absent = [c for c in DROP_COLS if c not in df.columns]
     if absent:
-        print(f"[info] drop listesinde olup CSV'de bulunmayan kolonlar: {absent}")
+        print(f"[info] columns in the drop list but absent from the CSV: {absent}")
     df = df.drop(columns=present)
 
-    # "?" -> NaN. İmputasyon pipeline içinde (SimpleImputer) yapılır ki
-    # train/serve arasında davranış farkı oluşmasın.
-    # DROP_COLS ile aynı savunma: eksik kolonu doğrudan indekslemek `KeyError`
-    # ile patlar; burada atlanır ve durum görünür kılınır. (Sessizce yutulmaz:
-    # eksik kolon kategorik listesine hiç girmeyeceği için pipeline zaten
-    # tutarlı kalır, ama operatör bunu bilmeli.)
+    # "?" -> NaN. Imputation happens inside the pipeline (SimpleImputer) so that
+    # train and serve cannot behave differently.
+    # The same defence as for DROP_COLS: indexing a missing column directly blows
+    # up with a `KeyError`; here it is skipped and the situation is made visible.
+    # (It is not swallowed silently: a missing column never enters the categorical
+    # list, so the pipeline stays consistent — but the operator should know.)
     qm_present = [c for c in QUESTION_MARK_COLS if c in df.columns]
     qm_absent = [c for c in QUESTION_MARK_COLS if c not in df.columns]
     if qm_absent:
-        print(f"[info] '?' normalizasyon listesinde olup CSV'de bulunmayan kolonlar: {qm_absent}")
+        print(f"[info] columns in the '?' normalisation list but absent from the CSV: {qm_absent}")
     if qm_present:
         df[qm_present] = df[qm_present].replace("?", np.nan)
 
     if TARGET not in df.columns:
-        raise ValueError(f"CSV'de hedef kolon '{TARGET}' yok.")
+        raise ValueError(f"The target column '{TARGET}' is missing from the CSV.")
     df[TARGET] = df[TARGET].map(TARGET_MAP)
     if df[TARGET].isna().any():
-        raise ValueError(f"{TARGET} kolonunda {TARGET_MAP} dışında değer var.")
+        raise ValueError(f"Column {TARGET} contains values outside {TARGET_MAP}.")
     df[TARGET] = df[TARGET].astype("int64")
 
     return df
 
 
 def split_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """Kategorik / sayısal kolonları ayırır.
+    """Separates categorical from numeric columns.
 
-    pandas 3'te metin kolonları `str` dtype'ına geçti; `include='object'` hâlâ
-    geriye dönük uyumluluk için onları yakalıyor ama Pandas4Warning üretiyor.
-    `include=['object', 'str']` aynı kolon kümesini uyarısız verir (doğrulandı).
+    In pandas 3 text columns moved to the `str` dtype; `include='object'` still
+    catches them for backward compatibility but emits a Pandas4Warning.
+    `include=['object', 'str']` returns the same column set without the warning
+    (verified).
     """
     feature_df = df.drop(columns=[TARGET])
     cat_cols = feature_df.select_dtypes(include=["object", "str"]).columns.tolist()
@@ -522,14 +539,15 @@ def split_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
 
 
 def build_pipeline(cat_cols: list[str], scale_pos_weight: float) -> Pipeline:
-    """preprocessor + model -> tek Pipeline.
+    """preprocessor + model -> a single Pipeline.
 
-    OrdinalEncoder'da `handle_unknown='use_encoded_value', unknown_value=-1`
-    orijinalde YOKTU. Notebook bağlamında sorun değildi (encoder sadece eğitim
-    verisini görüyordu) ama bir API için kabul edilemez: kullanıcı eğitimde
-    görülmemiş bir kategori gönderdiğinde pipeline ValueError ile çöküyordu.
-    Artık bilinmeyen kategori -1'e kodlanır; Faz 2'deki guardrail bu durumu
-    `out_of_distribution_warnings` ile ayrıca kullanıcıya bildirecek.
+    `handle_unknown='use_encoded_value', unknown_value=-1` on the OrdinalEncoder
+    was NOT in the original. In a notebook that did not matter (the encoder only
+    ever saw the training data), but it is unacceptable for an API: whenever a
+    user sent a category unseen in training, the pipeline crashed with a
+    ValueError. Now an unknown category is encoded to -1; the Phase 2 guardrail
+    additionally reports the situation to the user via
+    `out_of_distribution_warnings`.
     """
     cat_pipeline = Pipeline(
         steps=[
@@ -543,21 +561,20 @@ def build_pipeline(cat_cols: list[str], scale_pos_weight: float) -> Pipeline:
         remainder="passthrough",
     )
 
-    # ColumnTransformer'ın çıktısını DataFrame'e çeviriyoruz.
+    # We turn the ColumnTransformer's output into a DataFrame.
     #
-    # Neden: varsayılan numpy çıktısında LightGBM'in sklearn sarmalayıcısı
-    # kolonlara `Column_0..Column_33` gibi sahte isimler uydurup bunları
-    # `feature_names_in_`e yazıyor. Sonra her `predict` çağrısında sklearn
+    # Why: with the default numpy output, LightGBM's sklearn wrapper invents fake
+    # column names such as `Column_0..Column_33` and writes them into
+    # `feature_names_in_`. Every subsequent `predict` call then makes sklearn emit
     # "X does not have valid feature names, but LGBMClassifier was fitted with
-    # feature names" uyarısı basıyor — FastAPI altında bu her istekte log
-    # kirliliği demek. Ayrıca SHAP, feature adı olarak o anlamsız `Column_i`
-    # etiketlerini görüyor.
+    # feature names" — under FastAPI that means log noise on every request. SHAP
+    # would also see those meaningless `Column_i` labels as the feature names.
     #
-    # `set_output` ayarı estimator'ın üzerinde durur ve pickle ile birlikte
-    # taşınır, yani serving tarafında global `sklearn.set_config` çağırmaya
-    # gerek kalmaz. Tahminler üzerinde etkisi YOKTUR: numpy ve pandas
-    # çıktısıyla eğitilen modellerin predict_proba sonuçları birebir aynı
-    # (maksimum mutlak fark 0.0) — doğrulandı.
+    # The `set_output` setting lives on the estimator and travels with the pickle,
+    # so the serving side does not need a global `sklearn.set_config` call. It has
+    # NO effect on the predictions: models trained with numpy and pandas output
+    # produce identical predict_proba results (maximum absolute difference 0.0) —
+    # verified.
     preprocessor.set_output(transform="pandas")
 
     return Pipeline(
@@ -574,7 +591,7 @@ def build_pipeline(cat_cols: list[str], scale_pos_weight: float) -> Pipeline:
 
 
 def _py(value):
-    """numpy/pandas skalerlerini JSON-native tiplere çevirir."""
+    """Converts numpy/pandas scalars into JSON-native types."""
     if isinstance(value, (np.integer,)):
         return int(value)
     if isinstance(value, (np.floating,)):
@@ -587,42 +604,43 @@ def _py(value):
 
 
 def _require_finite(value, col: str, what: str) -> None:
-    """metadata.json'a NaN/Infinity yazılmasını engeller.
+    """Prevents NaN/Infinity from being written into metadata.json.
 
-    Neden `raise`, neden "sessizce 0 yaz" değil:
-    `json.dumps` varsayılan olarak NaN'ı ÇIPLAK `NaN` token'ı olarak yazar. Bu
-    geçerli JSON DEĞİLDİR: JavaScript'in `JSON.parse`'ı (yani frontend'in
-    `/model-info` çağrısı) dosyayı tamamen reddeder. Python'ın `json.load`'u
-    ise gevşek olduğu için hatayı sessizce yutar — yani sorun ancak frontend'de,
-    en geç yerde patlar.
+    Why `raise` rather than "silently write 0":
+    by default `json.dumps` writes NaN as a BARE `NaN` token. That is NOT valid
+    JSON: JavaScript's `JSON.parse` (i.e. the frontend's `/model-info` call)
+    rejects the file outright. Python's `json.load` is lenient and swallows the
+    problem — so the failure only surfaces in the frontend, at the latest possible
+    moment.
 
-    Kategorik tarafta mod boşsa zaten `ValueError` fırlatılıyordu; sayısal
-    tarafta hiçbir kontrol yoktu. Bu asimetriyi kapatıyoruz. Uydurma bir
-    varsayılan yazmak yerine eğitimi durduruyoruz: tamamen boş bir sayısal
-    kolon veri hatasıdır, artefaktla gizlenmemeli.
+    On the categorical side an empty mode already raised a `ValueError`; on the
+    numeric side there was no check at all. This closes that asymmetry. Rather
+    than inventing a default we stop the training: an entirely empty numeric
+    column is a data error and must not be hidden by the artifact.
     """
     if value is None or (isinstance(value, float) and not np.isfinite(value)):
         raise ValueError(
-            f"'{col}' kolonu için {what} sonlu bir sayı değil ({value!r}). "
-            "Kolon büyük olasılıkla eğitim setinde tamamen boş. "
-            "metadata.json geçerli JSON olmazdı; eğitim durduruldu."
+            f"The {what} for column '{col}' is not a finite number ({value!r}). "
+            "The column is most likely entirely empty in the training set. "
+            "metadata.json would not be valid JSON; training stopped."
         )
 
 
 def build_defaults(X_train: pd.DataFrame, cat_cols: list[str]) -> dict:
-    """API'de verilmeyen alanları doldurmak için kullanılacak varsayılanlar.
+    """The defaults used to fill fields the API request did not supply.
 
-    Sayısal -> MEDYAN, kategorik -> MOD.
-    Orijinal notebook her kolona `mode()` uyguluyordu; `total_claim_amount` gibi
-    sürekli bir değişkende mod istatistiksel olarak anlamsızdır (çoğu zaman
-    rastgele bir tekil gözlem). Medyan hem daha temsili hem aykırı değere
-    dayanıklı.
+    Numeric -> MEDIAN, categorical -> MODE.
+    The original notebook applied `mode()` to every column; on a continuous
+    variable such as `total_claim_amount` the mode is statistically meaningless
+    (usually a random single observation). The median is both more representative
+    and robust to outliers.
 
-    Değerler SADECE X_train'den hesaplanır — test verisi varsayılanlara sızmaz.
+    The values are computed from X_train ONLY — test data never leaks into the
+    defaults.
 
-    Tam sayı kolonlarında medyan (n çift ise) .5 çıkabilir; değeri kolonun
-    eğitimdeki dtype'ına yuvarlıyoruz ki JSON'dan geri yüklenen satır eğitim
-    verisiyle birebir aynı tiplere sahip olsun ("tip kaybı olmamalı" gereği).
+    On integer columns the median can come out as .5 (when n is even); we round
+    the value to the column's training dtype so that a row reloaded from JSON has
+    exactly the same types as the training data ("no type loss" requirement).
     """
     defaults: dict[str, dict] = {}
 
@@ -633,15 +651,15 @@ def build_defaults(X_train: pd.DataFrame, cat_cols: list[str]) -> dict:
         if col in cat_cols:
             mode = series.mode(dropna=True)
             if mode.empty:
-                raise ValueError(f"'{col}' için mod hesaplanamadı (tüm değerler NaN).")
+                raise ValueError(f"The mode for '{col}' could not be computed (all values NaN).")
             value = str(mode.iloc[0])
             strategy = "mode"
             dtype_name = "str"
         else:
             median = float(series.median())
-            # Tamamen boş bir sayısal kolonda `median()` NaN döner ve bu
-            # metadata.json'ı geçersiz JSON yapar (bkz. `_require_finite`).
-            _require_finite(median, col, "medyan")
+            # On an entirely empty numeric column `median()` returns NaN, which
+            # makes metadata.json invalid JSON (see `_require_finite`).
+            _require_finite(median, col, "median")
             if pd.api.types.is_integer_dtype(series):
                 value = round(median)
             else:
@@ -650,10 +668,10 @@ def build_defaults(X_train: pd.DataFrame, cat_cols: list[str]) -> dict:
 
         defaults[col] = {"value": _py(value), "dtype": dtype_name, "strategy": strategy}
 
-    # Güvenlik teyidi: PII kolonları drop edildi, defaults üzerinden sızamaz.
+    # Safety confirmation: the PII columns were dropped and cannot leak via defaults.
     leaked = [c for c in ("policy_number", "insured_zip", "incident_location") if c in defaults]
     if leaked:
-        raise ValueError(f"PII alanı defaults'a sızmış: {leaked}")
+        raise ValueError(f"A PII field leaked into defaults: {leaked}")
 
     return defaults
 
@@ -664,17 +682,17 @@ def build_training_ranges(
     cat_cols: list[str],
     num_cols: list[str],
 ) -> dict:
-    """Faz 2 guardrail'inin dayanacağı "eğitimde ne gördük" kaydı.
+    """The "what did we see in training" record the Phase 2 guardrail relies on.
 
-    Bu bilgi eğitim anında yakalanmazsa sonradan geri kazanılamaz (CSV
-    kaybolabilir, split değişebilir), o yüzden metadata'ya yazılıyor.
+    If this is not captured at training time it cannot be recovered later (the CSV
+    may be lost, the split may change), so it is written into the metadata.
 
-    - Sayısal: X_train'deki min/max. Bunun dışındaki input ekstrapolasyondur.
-    - Kategorik: fitted OrdinalEncoder'ın `categories_` listesi. Kasıtlı olarak
-      ham X_train'deki unique'ler DEĞİL: encoder imputasyon SONRASI fit edilir,
-      dolayısıyla `categories_` tam olarak "gerçek bir koda maplenen" değerler
-      kümesidir. Bu listede olmayan her şey -1 (unknown) yolundan geçer, yani
-      guardrail ile encoder birebir aynı gerçeği raporlar.
+    - Numeric: the min/max in X_train. Anything outside that is extrapolation.
+    - Categorical: the fitted OrdinalEncoder's `categories_` list. Deliberately
+      NOT the uniques in the raw X_train: the encoder is fitted AFTER imputation,
+      so `categories_` is exactly the set of values that map to a real code.
+      Anything not in that list goes down the -1 (unknown) path, which means the
+      guardrail and the encoder report exactly the same truth.
     """
     ranges: dict[str, dict] = {}
 
@@ -682,10 +700,10 @@ def build_training_ranges(
         series = X_train[col]
         col_min = _py(series.min())
         col_max = _py(series.max())
-        # Boş sayısal kolonda min/max NaN olur -> geçersiz JSON (bkz.
-        # `_require_finite`). Ayrıca NaN sınırlı bir aralık Faz 2 guardrail'ini
-        # sessizce işlevsiz bırakırdı: `x < NaN` her zaman False, yani hiçbir
-        # değer OOD sayılmazdı.
+        # On an empty numeric column min/max come out as NaN -> invalid JSON (see
+        # `_require_finite`). A NaN-bounded range would also leave the Phase 2
+        # guardrail silently inoperative: `x < NaN` is always False, so no value
+        # would ever count as OOD.
         _require_finite(col_min, col, "min")
         _require_finite(col_max, col, "max")
         ranges[col] = {
@@ -702,7 +720,7 @@ def build_training_ranges(
         fitted_pipeline.named_steps["preprocessor"].transformers_[0][2]
     )
     if encoder_cols != cat_cols:
-        raise ValueError("ColumnTransformer'daki kategorik kolon sırası beklenenden farklı.")
+        raise ValueError("The categorical column order in the ColumnTransformer is not as expected.")
 
     for col, categories in zip(encoder_cols, encoder.categories_):
         ranges[col] = {
@@ -713,7 +731,7 @@ def build_training_ranges(
 
     missing = set(X_train.columns) - set(ranges)
     if missing:
-        raise ValueError(f"training_ranges'te eksik kolonlar: {sorted(missing)}")
+        raise ValueError(f"Columns missing from training_ranges: {sorted(missing)}")
 
     return ranges
 
@@ -721,18 +739,18 @@ def build_training_ranges(
 def clean_transformed_names(preprocessor: ColumnTransformer) -> list[str]:
     """'cat__incident_severity' / 'remainder__witnesses' -> 'incident_severity'.
 
-    SHAP çıktısının frontend'de okunabilir olması için gerekli.
+    Required so the SHAP output is readable in the frontend.
     """
     return [name.split("__", 1)[-1] for name in preprocessor.get_feature_names_out()]
 
 
 # --------------------------------------------------------------------------- #
-# Ana akış
+# Main flow
 # --------------------------------------------------------------------------- #
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Faz 0 — pipeline konsolidasyonu")
+    parser = argparse.ArgumentParser(description="Phase 0 — pipeline consolidation")
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()
@@ -740,56 +758,56 @@ def main() -> int:
     csv_path: Path = args.data.resolve()
     output_dir: Path = args.output_dir.resolve()
     if not csv_path.exists():
-        print(f"[hata] veri dosyası bulunamadı: {csv_path}", file=sys.stderr)
+        print(f"[error] data file not found: {csv_path}", file=sys.stderr)
         return 1
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[1/6] Veri yükleniyor: {csv_path}")
+    print(f"[1/6] Loading data: {csv_path}")
     df = load_raw_frame(csv_path)
     cat_cols, num_cols = split_columns(df)
-    print(f"      satır={len(df)}  kategorik={len(cat_cols)}  sayısal={len(num_cols)}")
+    print(f"      rows={len(df)}  categorical={len(cat_cols)}  numeric={len(num_cols)}")
 
     X = df.drop(columns=TARGET)
     y = df[TARGET]
 
-    # Erken sınıf kontrolü. İki ayrı gizli patlama noktasını kapatır:
-    #   - `train_test_split(stratify=y)`: tek sınıflı ya da bir sınıfı tek
-    #     örnekli veride anlaşılması zor bir ValueError fırlatır.
-    #   - `scale_pos_weight`: pozitif sınıf yoksa sıfıra bölme.
-    # İkisi de ancak akışın ortasında patlar; burada ne olduğunu söyleyen tek
-    # bir hatayla erken duruyoruz.
+    # An early class check. It closes two separate hidden failure points:
+    #   - `train_test_split(stratify=y)`: raises a hard-to-read ValueError on
+    #     single-class data, or data with only one sample of a class.
+    #   - `scale_pos_weight`: division by zero when there is no positive class.
+    # Both would only blow up halfway through the flow; here we stop early with a
+    # single error that says what happened.
     class_counts = y.value_counts()
     if len(class_counts) < 2:
         raise ValueError(
-            f"Hedef '{TARGET}' tek sınıflı: {class_counts.to_dict()}. "
-            "İkili sınıflandırma için her iki sınıf da gerekli "
-            f"(beklenen etiketler: {sorted(TARGET_MAP.values())})."
+            f"The target '{TARGET}' has a single class: {class_counts.to_dict()}. "
+            "Binary classification requires both classes "
+            f"(expected labels: {sorted(TARGET_MAP.values())})."
         )
     min_class_count = int(class_counts.min())
-    # Stratified split'in her sınıftan hem train'e hem test'e örnek koyabilmesi
-    # için sınıf başına en az 2 örnek şart.
+    # A stratified split needs at least 2 samples per class so it can put one of
+    # each class into both train and test.
     if min_class_count < 2:
         raise ValueError(
-            f"Hedef '{TARGET}' sınıf dağılımı stratified split için yetersiz: "
-            f"{class_counts.to_dict()}. Sınıf başına en az 2 örnek gerekir."
+            f"The class distribution of '{TARGET}' is insufficient for a stratified "
+            f"split: {class_counts.to_dict()}. At least 2 samples per class are required."
         )
 
-    # Split, feature engineering'den ÖNCE ve pipeline fit'inden ÖNCE yapılır.
-    # Imputer/encoder istatistikleri sadece X_train'den öğrenilir (leak yok).
+    # The split happens BEFORE feature engineering and BEFORE fitting the
+    # pipeline. Imputer/encoder statistics are learned from X_train only (no leak).
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE
     )
     n_pos_train = int((y_train == 1).sum())
     if n_pos_train == 0:
         raise ValueError(
-            "Eğitim setinde hiç pozitif örnek yok; scale_pos_weight hesaplanamaz. "
-            f"test_size={TEST_SIZE} ile split çok küçük bir azınlık sınıfını "
-            "tamamen test tarafına atmış olabilir."
+            "There is no positive sample in the training set; scale_pos_weight cannot "
+            f"be computed. With test_size={TEST_SIZE} the split may have thrown a very "
+            "small minority class entirely onto the test side."
         )
     scale_pos_weight = float((y_train == 0).sum() / n_pos_train)
     print(f"[2/6] Split: train={len(X_train)} test={len(X_test)}  scale_pos_weight={scale_pos_weight:.4f}")
 
-    print("[3/6] Pipeline HAM X_train üzerinde fit ediliyor...")
+    print("[3/6] Fitting the pipeline on RAW X_train...")
     pipeline = build_pipeline(cat_cols, scale_pos_weight)
     pipeline.fit(X_train, y_train)
 
@@ -803,21 +821,22 @@ def main() -> int:
     print("\nTest classification report:")
     print(classification_report(y_test, pipeline.predict(X_test), digits=3))
 
-    print("[5/6] Metadata oluşturuluyor...")
+    print("[5/6] Building metadata...")
     preprocessor = pipeline.named_steps["preprocessor"]
     pipeline_input_order = list(X_train.columns)
     transformed_display_names = clean_transformed_names(preprocessor)
 
-    # Feature etkisi ölçümü fairness bölümünden ÖNCE hesaplanır: fairness
-    # beyanı bu ölçüme dayanıyor (beyan edilen ile ölçülen ayrı alanlar).
+    # The feature influence measurement is computed BEFORE the fairness section:
+    # the fairness declaration builds on that measurement (declared and measured
+    # are separate fields).
     feature_influence = build_feature_influence(pipeline, transformed_display_names)
     n_dead = feature_influence["summary"]["n_without_influence"]
     print(
-        f"      feature etkisi: {feature_influence['summary']['n_with_influence']} "
-        f"etkili / {n_dead} etkisiz (split=0)"
+        f"      feature influence: {feature_influence['summary']['n_with_influence']} "
+        f"used / {n_dead} unused (split=0)"
     )
     if n_dead:
-        print(f"      etkisiz: {', '.join(feature_influence['summary']['features_without_influence'])}")
+        print(f"      unused: {', '.join(feature_influence['summary']['features_without_influence'])}")
     metadata = {
         "model_name": "insurance-fraud-detection",
         "model_version": "1.0.0",
@@ -839,22 +858,22 @@ def main() -> int:
             "metric_name": "average_precision_score (PR-AUC)",
         },
         "feature_list": {
-            # ADLANDIRMA UYARISI: bu liste eskiden `raw_input_order` deniyordu,
-            # ama içeriği HAM CSV kolonları DEĞİL. Ham CSV 39 kolondur ve
-            # `incident_date` / `policy_bind_date` / PII kolonlarını içerir;
-            # buradaki 34 kolon ise `load_raw_frame()` temizliğinden SONRA
-            # pipeline'ın gerçekten beklediği şemadır. Faz 1 bu listeye
-            # güveneceği için ad ile içerik artık uyumlu.
+            # NAMING WARNING: this list used to be called `raw_input_order`, but
+            # its contents are NOT raw CSV columns. The raw CSV has 39 columns and
+            # includes `incident_date` / `policy_bind_date` / the PII columns; the
+            # 34 columns here are the schema the pipeline actually expects AFTER
+            # the `load_raw_frame()` cleaning. Since Phase 1 relies on this list,
+            # the name and the contents now agree.
             "pipeline_input_order": pipeline_input_order,
             "pipeline_input_order_description": (
-                "pipeline.predict_proba()'ya verilecek DataFrame'in kolon adları ve "
-                "sırası. Ham CSV şeması DEĞİLDİR: preprocessing_contract."
-                "caller_must_apply_before_predict adımları uygulandıktan SONRAKİ "
-                "şemadır."
+                "The column names and order of the DataFrame to be handed to "
+                "pipeline.predict_proba(). This is NOT the raw CSV schema: it is the "
+                "schema AFTER the preprocessing_contract."
+                "caller_must_apply_before_predict steps have been applied."
             ),
             "categorical_features": cat_cols,
             "numeric_features": num_cols,
-            # ColumnTransformer çıktısındaki kolon sırası (SHAP eşlemesi için).
+            # The column order in the ColumnTransformer output (for the SHAP mapping).
             "transformed_order": list(preprocessor.get_feature_names_out()),
             "transformed_display_names": transformed_display_names,
             "dropped_columns": DROP_COLS,
@@ -881,26 +900,26 @@ def main() -> int:
         },
     }
 
-    print("[6/6] Artefaktlar yazılıyor...")
+    print("[6/6] Writing artifacts...")
     pipeline_path = output_dir / "pipeline.pkl"
     metadata_path = output_dir / "metadata.json"
     joblib.dump(pipeline, pipeline_path)
 
-    # `allow_nan=False`: son savunma hattı. Kolon bazlı kontroller
-    # (`_require_finite`) hedefli ve okunabilir hata verir; bu ise metadata'nın
-    # HERHANGİ bir yerinde NaN/Infinity kalırsa yazmayı tamamen engeller.
-    # Varsayılan `allow_nan=True` bunları çıplak `NaN`/`Infinity` token'ı olarak
-    # yazar — Python geri okuyabilir ama bu GEÇERLİ JSON DEĞİLDİR ve frontend'in
-    # `JSON.parse`'ı dosyayı reddeder. Hata burada patlasın, tarayıcıda değil.
+    # `allow_nan=False`: the last line of defence. The per-column checks
+    # (`_require_finite`) give targeted, readable errors; this one blocks the write
+    # entirely if a NaN/Infinity survives ANYWHERE in the metadata. The default
+    # `allow_nan=True` writes them as bare `NaN`/`Infinity` tokens — Python can
+    # read them back, but that IS NOT VALID JSON and the frontend's `JSON.parse`
+    # rejects the file. Let the error surface here, not in the browser.
     serialized = json.dumps(metadata, indent=2, ensure_ascii=False, allow_nan=False)
     metadata_path.write_text(serialized, encoding="utf-8")
 
     print(f"      {pipeline_path}  ({pipeline_path.stat().st_size / 1024:.1f} KB)")
     print(f"      {metadata_path}  ({metadata_path.stat().st_size / 1024:.1f} KB)")
-    print("\nTamam. Model artefaktı olarak pipeline.pkl tek başına yeterlidir; "
-          "preprocessor.pkl / best_model_lgb.pkl / defaults.pkl artık gerekmiyor.")
-    print("Ancak pipeline HAM CSV satırı kabul ETMEZ: çağıran taraf önce "
-          "metadata.json -> preprocessing_contract adımlarını uygulamalı.")
+    print("\nDone. pipeline.pkl alone is sufficient as the model artifact; "
+          "preprocessor.pkl / best_model_lgb.pkl / defaults.pkl are no longer needed.")
+    print("But the pipeline does NOT accept a raw CSV row: the caller must first "
+          "apply the metadata.json -> preprocessing_contract steps.")
     return 0
 
 

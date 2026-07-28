@@ -1,20 +1,21 @@
 @import "tailwindcss";
 
 /*
- * Koyu tema SINIF tabanlı (`<html class="dark">`), medya sorgusu tabanlı değil.
- * Sebep: kullanıcının manuel seçimi sistem tercihini ezebilmeli. İlk boyamadan
- * önce sınıf `index.html` içindeki küçük script tarafından konur (FOUC yok).
+ * The dark theme is CLASS based (`<html class="dark">`), not media-query based.
+ * Reason: a manual choice by the user has to be able to override the system
+ * preference. The class is set before first paint by the small script in
+ * `index.html`, so there is no flash of the wrong theme.
  */
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  /* Risk skalası — üç seviye, hem açık hem koyu temada okunur kontrastta.
-     Renk TEK BAŞINA bilgi taşımaz: her rozette metin de vardır. */
+  /* Risk scale — three levels, legible contrast in both light and dark themes.
+     Colour never carries information ALONE: every badge also has text. */
   --color-risk-low: oklch(0.62 0.14 155);
   --color-risk-medium: oklch(0.68 0.15 75);
   --color-risk-high: oklch(0.58 0.2 25);
 
-  /* SHAP katkı yönü: riski artıran / azaltan. */
+  /* Direction of a SHAP contribution: pushed the risk up / pulled it down. */
   --color-shap-positive: oklch(0.58 0.2 25);
   --color-shap-negative: oklch(0.6 0.13 235);
 }
@@ -35,8 +36,8 @@ html.dark body {
   @apply bg-slate-950 text-slate-100;
 }
 
-/* Sayısal girdilerdeki artırma/azaltma okları tutarsız görünüyor ve dokunmatik
-   cihazlarda yanlışlıkla tetikleniyor; kaldırıldı. */
+/* The spinner arrows on number inputs render inconsistently across browsers and
+   fire by accident on touch devices; removed. */
 input[type="number"]::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none;
@@ -48,7 +49,7 @@ input[type="number"] {
   appearance: textfield;
 }
 
-/* Klavye kullanıcısı için görünür odak halkası — fare tıklamasında görünmez. */
+/* Visible focus ring for keyboard users — stays hidden on mouse clicks. */
 :focus-visible {
   @apply outline-2 outline-offset-2 outline-sky-600;
 }

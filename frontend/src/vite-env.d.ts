@@ -1,12 +1,13 @@
 /// <reference types="vite/client" />
 
-// `import.meta.env` tipleri ve `.css` gibi varlık importlarının modül
-// bildirimleri bu referanstan gelir.
+// This reference supplies the `import.meta.env` types and the module
+// declarations for asset imports such as `.css`.
 
 interface ImportMetaEnv {
   /**
-   * Backend adresi. Faz 7'de Netlify ortam değişkeni olarak HF Spaces URL'i
-   * verilecek; yerelde tanımsız bırakılıp varsayılan kullanılır.
+   * Backend address. In Phase 7 Netlify supplies the Hugging Face Spaces URL as
+   * an environment variable; locally it is left undefined and the default
+   * applies.
    */
   readonly VITE_API_URL?: string;
 }

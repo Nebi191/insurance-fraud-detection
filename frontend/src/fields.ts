@@ -1,28 +1,29 @@
 /**
- * Form alanlarının İNSAN KARARI olan kısmı: Türkçe etiketler, gruplama, sıra.
+ * The HUMAN-AUTHORED part of the form: labels, grouping, ordering.
  *
- * NEDEN YARI-DİNAMİK
- * ------------------
- * Burada BULUNMAYAN her şey `/model-info`'dan gelir: seçenek listeleri,
- * min/max aralıkları, varsayılan değerler ve —en önemlisi— hangi alanın modeli
- * etkilemediği (`feature_influence`).
+ * WHY THIS IS ONLY HALF-STATIC
+ * ----------------------------
+ * Everything NOT in this file comes from `/model-info`: the option lists, the
+ * min/max ranges, the default values and — most importantly — which fields the
+ * model does not actually use (`feature_influence`).
  *
- * Etkisizlik listesini buraya gömmek YASAK: model yeniden eğitilince liste
- * değişir ve gömülü kopya sessizce yalan söylemeye başlar. Rozetler tek
- * doğruluk kaynağından (artefakt) beslenir.
+ * Hard-coding that "unused" list here is forbidden: retraining the model changes
+ * it, and an embedded copy would start lying silently. The badges are fed from a
+ * single source of truth (the artifact).
  *
- * Etiket ve gruplama ise API'den gelemez — bunlar çeviri ve bilgi mimarisi
- * kararlarıdır. Alan adı artefaktta değişirse `assertFieldsCoverContract()`
- * bunu açılışta yakalar; sessizce eksik form göstermeyiz.
+ * Labels and grouping, on the other hand, cannot come from the API — they are
+ * wording and information-architecture decisions. If a field name changes in the
+ * artifact, `assertFieldsCoverContract()` catches it at startup; we never render
+ * a quietly incomplete form.
  */
 
 export interface FieldMeta {
-  /** API alan adı — `capital-gains` gibi tireli hâliyle. */
+  /** API field name, hyphenated exactly as the contract spells it (`capital-gains`). */
   name: string;
   label: string;
-  /** Etiketin altında görünen kısa açıklama. */
+  /** Short helper text rendered under the label. */
   hint?: string;
-  /** Sayısal alanlarda girdi adımı (ondalıklı primler için 0.01). */
+  /** Step for numeric inputs (0.01 for the fractional premium). */
   step?: number;
 }
 
@@ -34,144 +35,140 @@ export interface FieldGroup {
 }
 
 /**
- * Accordion'da AÇIK başlayan grup: skoru fiilen sürükleyen alanlar.
+ * The group that starts EXPANDED: the fields that actually move the score.
  *
- * Seçim ölçüme dayanıyor (booster split sayıları): insured_hobbies 353,
- * incident_severity 173, policy_annual_premium 107, capital-gains 75,
- * auto_year 74, witnesses 37. Liste burada sabit çünkü hangi alanların
- * "vitrine" çıkacağı bir sunum kararı; rozetler ise ölçümden gelir.
+ * The selection is measured, not guessed (booster split counts): insured_hobbies
+ * 353, incident_severity 173, policy_annual_premium 107, capital-gains 75,
+ * auto_year 74, witnesses 37. The list is fixed here because which fields go in
+ * the shop window is a presentation decision; the badges come from measurement.
  */
 export const HIGHLIGHT_GROUP: FieldGroup = {
   id: "highlights",
-  title: "Skoru en çok etkileyenler",
+  title: "Strongest drivers of the score",
   description:
-    "Modelin en sık dallandığı altı alan. Diğer alanları boş bırakırsanız " +
-    "eğitim verisinin medyan/mod değerleriyle doldurulur.",
+    "The six fields the model splits on most often. Anything you leave blank is " +
+    "filled in with the median/mode of the training data.",
   fields: [
-    { name: "insured_hobbies", label: "Hobi" },
-    { name: "incident_severity", label: "Hasar şiddeti" },
-    { name: "policy_annual_premium", label: "Yıllık prim", step: 0.01 },
-    { name: "capital-gains", label: "Sermaye kazancı" },
-    { name: "auto_year", label: "Araç model yılı" },
-    { name: "witnesses", label: "Tanık sayısı" },
+    { name: "insured_hobbies", label: "Hobby" },
+    { name: "incident_severity", label: "Incident severity" },
+    { name: "policy_annual_premium", label: "Annual premium", step: 0.01 },
+    { name: "capital-gains", label: "Capital gains" },
+    { name: "auto_year", label: "Vehicle model year" },
+    { name: "witnesses", label: "Witnesses" },
   ],
 };
 
-/** Kalan alanlar, mantıksal gruplarında. */
+/** The remaining fields, in their logical groups. */
 export const FIELD_GROUPS: FieldGroup[] = [
   {
     id: "policy",
-    title: "Poliçe / müşteri",
-    description: "Sigorta ilişkisine ve poliçe koşullarına ait alanlar.",
+    title: "Policy & customer",
+    description: "Fields describing the insurance relationship and policy terms.",
     fields: [
-      { name: "months_as_customer", label: "Müşteri süresi", hint: "Ay cinsinden" },
-      { name: "age", label: "Yaş" },
-      { name: "policy_state", label: "Poliçe eyaleti" },
-      { name: "policy_csl", label: "Teminat limiti (CSL)", hint: "Kişi başı / olay başı" },
-      { name: "policy_deductable", label: "Muafiyet" },
-      { name: "umbrella_limit", label: "Şemsiye poliçe limiti" },
-      { name: "policy_bind_year", label: "Poliçe başlangıç yılı" },
+      { name: "months_as_customer", label: "Customer tenure", hint: "In months" },
+      { name: "age", label: "Age" },
+      { name: "policy_state", label: "Policy state" },
+      { name: "policy_csl", label: "Combined single limit (CSL)", hint: "Per person / per occurrence" },
+      { name: "policy_deductable", label: "Deductible" },
+      { name: "umbrella_limit", label: "Umbrella limit" },
+      { name: "policy_bind_year", label: "Policy bind year" },
     ],
   },
   {
     id: "insured",
-    title: "Sigortalı profili",
-    description: "Sigortalının demografik ve finansal bilgileri.",
+    title: "Insured profile",
+    description: "Demographic and financial details of the policyholder.",
     fields: [
-      { name: "insured_sex", label: "Cinsiyet" },
-      { name: "insured_education_level", label: "Eğitim düzeyi" },
-      { name: "insured_occupation", label: "Meslek" },
-      { name: "insured_relationship", label: "Hane ilişkisi" },
+      { name: "insured_sex", label: "Sex" },
+      { name: "insured_education_level", label: "Education level" },
+      { name: "insured_occupation", label: "Occupation" },
+      { name: "insured_relationship", label: "Household relationship" },
       {
         name: "capital-loss",
-        label: "Sermaye zararı",
-        hint: "Bu veri setinde negatif değerle kodlanır",
+        label: "Capital loss",
+        hint: "Encoded as a negative number in this dataset",
       },
     ],
   },
   {
     id: "incident",
-    title: "Olay",
-    description: "Kazanın kendisine ait alanlar.",
+    title: "Incident",
+    description: "Fields describing the accident itself.",
     fields: [
-      { name: "incident_type", label: "Olay tipi" },
-      { name: "collision_type", label: "Çarpışma tipi" },
-      { name: "authorities_contacted", label: "Bilgilendirilen birim" },
-      { name: "incident_state", label: "Olay eyaleti" },
-      { name: "incident_city", label: "Olay şehri" },
-      { name: "incident_hour_of_the_day", label: "Olay saati", hint: "0-23" },
-      { name: "number_of_vehicles_involved", label: "Karışan araç sayısı" },
-      { name: "property_damage", label: "Mal hasarı var mı" },
-      { name: "bodily_injuries", label: "Yaralı sayısı" },
-      { name: "police_report_available", label: "Polis raporu var mı" },
+      { name: "incident_type", label: "Incident type" },
+      { name: "collision_type", label: "Collision type" },
+      { name: "authorities_contacted", label: "Authorities contacted" },
+      { name: "incident_state", label: "Incident state" },
+      { name: "incident_city", label: "Incident city" },
+      { name: "incident_hour_of_the_day", label: "Hour of the day", hint: "0-23" },
+      { name: "number_of_vehicles_involved", label: "Vehicles involved" },
+      { name: "property_damage", label: "Property damage" },
+      { name: "bodily_injuries", label: "Bodily injuries" },
+      { name: "police_report_available", label: "Police report available" },
       {
         name: "incident_year",
-        label: "Olay yılı",
-        hint: "Eğitim verisinin tamamı 2015 — başka bir yıl dağılım dışı sayılır",
+        label: "Incident year",
+        hint: "Every training row is 2015 — any other year counts as out of distribution",
       },
     ],
   },
   {
     id: "claim",
-    title: "Tazminat kalemleri",
-    description: "Talep edilen tutarlar.",
+    title: "Claim amounts",
+    description: "The amounts being claimed.",
     fields: [
-      { name: "total_claim_amount", label: "Toplam talep tutarı" },
-      { name: "injury_claim", label: "Yaralanma tazminatı" },
-      { name: "property_claim", label: "Mal tazminatı" },
-      { name: "vehicle_claim", label: "Araç tazminatı" },
+      { name: "total_claim_amount", label: "Total claim amount" },
+      { name: "injury_claim", label: "Injury claim" },
+      { name: "property_claim", label: "Property claim" },
+      { name: "vehicle_claim", label: "Vehicle claim" },
     ],
   },
   {
     id: "vehicle",
-    title: "Araç",
-    description: "Araca ait alanlar.",
-    fields: [{ name: "auto_make", label: "Araç markası" }],
+    title: "Vehicle",
+    description: "Fields describing the insured vehicle.",
+    fields: [{ name: "auto_make", label: "Vehicle make" }],
   },
 ];
 
 export const ALL_GROUPS: FieldGroup[] = [HIGHLIGHT_GROUP, ...FIELD_GROUPS];
 
-/** Form genelinde tanımlı bütün alan adları. */
+/** Every field name defined across the form. */
 export const ALL_FIELD_NAMES: string[] = ALL_GROUPS.flatMap((group) =>
   group.fields.map((field) => field.name),
 );
 
 /**
- * API alan adı -> Türkçe etiket.
+ * API field name -> human-readable label.
  *
- * SHAP grafiği ve uyarı listeleri backend'den ham alan adlarıyla geliyor
- * (`capital-gains` gibi); kullanıcıya gösterilirken aynı etiketi kullanmak
- * formla grafiği birbirine bağlar. Tablo `ALL_GROUPS`'tan TÜRETİLİYOR — ikinci
- * bir elle liste tutmak, ikisinin ayrışması demek olurdu.
+ * The SHAP chart and the warning lists arrive from the backend with raw field
+ * names (`capital-gains`); reusing the same label there ties the chart back to
+ * the form. The table is DERIVED from `ALL_GROUPS` — keeping a second hand-written
+ * list would only guarantee the two drift apart.
  */
 export const FIELD_LABELS: Record<string, string> = Object.fromEntries(
   ALL_GROUPS.flatMap((group) => group.fields.map((field) => [field.name, field.label])),
 );
 
-/** Etiket bulunamazsa ham adı döndürür — sessizce boş göstermez. */
+/** Falls back to the raw name so an unknown field never renders blank. */
 export function fieldLabel(name: string): string {
   return FIELD_LABELS[name] ?? name;
 }
 
 /**
- * Kategorik değerlerin okunabilir karşılıkları.
+ * Display forms for categorical values.
  *
- * API'ye GÖNDERİLEN değer her zaman anahtarın kendisidir; burada yalnızca
- * gösterim değişir. Bütün kategorileri çevirmiyoruz (hobi, meslek, marka gibi
- * alanlar veri setinin ham değerleriyle daha dürüst okunuyor) — yalnızca
- * anlamı Türkçede kaybolanları.
+ * The value SENT to the API is always the key itself; only the rendering
+ * changes. This map exists because the raw dataset shouts (`YES`, `MALE`) and
+ * encodes missingness as a bare `?`. Values that already read well (hobbies,
+ * occupations, makes) are left exactly as the dataset spells them.
  */
 export const VALUE_LABELS: Record<string, string> = {
-  "?": "Bilinmiyor (?)",
-  YES: "Evet",
-  NO: "Hayır",
-  MALE: "Erkek",
-  FEMALE: "Kadın",
-  "Major Damage": "Ağır hasar",
-  "Minor Damage": "Hafif hasar",
-  "Total Loss": "Pert (tam hasar)",
-  "Trivial Damage": "Çok hafif hasar",
+  "?": "Unknown (?)",
+  YES: "Yes",
+  NO: "No",
+  MALE: "Male",
+  FEMALE: "Female",
 };
 
 export function valueLabel(value: string): string {
@@ -179,12 +176,12 @@ export function valueLabel(value: string): string {
 }
 
 /**
- * Formun API sözleşmesini tam kapsadığını doğrular.
+ * Verifies that the form covers the API contract exactly.
  *
- * NEDEN GEREKLİ: alan listesi elle yazıldığı için artefakt değiştiğinde
- * sessizce eskir. Eksik alan = kullanıcının hiç göremediği bir girdi; fazla
- * alan = `extra="forbid"` yüzünden her isteğin 422 alması. İkisi de sessiz
- * değil, gürültülü başarısız olmalı.
+ * WHY THIS IS NEEDED: the field list is hand-written, so it goes stale silently
+ * when the artifact changes. A missing field is an input the user can never see;
+ * an extra field means every request gets a 422 because of `extra="forbid"`.
+ * Both must fail loudly rather than quietly.
  */
 export function assertFieldsCoverContract(pipelineInputOrder: string[]): void {
   const declared = new Set(ALL_FIELD_NAMES);
@@ -197,14 +194,14 @@ export function assertFieldsCoverContract(pipelineInputOrder: string[]): void {
   );
 
   const problems: string[] = [];
-  if (missing.length) problems.push(`formda olmayan alan(lar): ${missing.join(", ")}`);
-  if (extra.length) problems.push(`API'de olmayan alan(lar): ${extra.join(", ")}`);
-  if (duplicates.length) problems.push(`iki kez tanımlı: ${duplicates.join(", ")}`);
+  if (missing.length) problems.push(`field(s) missing from the form: ${missing.join(", ")}`);
+  if (extra.length) problems.push(`field(s) not in the API contract: ${extra.join(", ")}`);
+  if (duplicates.length) problems.push(`declared twice: ${duplicates.join(", ")}`);
 
   if (problems.length) {
     throw new Error(
-      `Form alanları API sözleşmesiyle uyuşmuyor — ${problems.join(" | ")}. ` +
-        "src/fields.ts güncellenmeli.",
+      `Form fields do not match the API contract — ${problems.join(" | ")}. ` +
+        "src/fields.ts needs updating.",
     );
   }
 }

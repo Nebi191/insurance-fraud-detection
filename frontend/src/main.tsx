@@ -6,7 +6,7 @@ import "./index.css";
 
 const container = document.getElementById("root");
 if (!container) {
-  throw new Error("#root bulunamadı — index.html bozulmuş olabilir.");
+  throw new Error("#root not found — index.html may be corrupted.");
 }
 
 createRoot(container).render(

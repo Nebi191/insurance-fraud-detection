@@ -4,13 +4,13 @@ dist-ssr
 *.local
 .vite
 
-# TypeScript artımlı derleme önbelleği — makineye özgü, repoya girmez.
+# TypeScript incremental build cache — machine specific, never committed.
 *.tsbuildinfo
 
-# Netlify (Faz 7)
+# Netlify (Phase 7)
 .netlify
 
-# Ortam değişkenleri — VITE_API_URL burada tutulur, repoya girmez.
+# Environment variables — VITE_API_URL lives here, never committed.
 .env
 .env.local
 .env.*.local

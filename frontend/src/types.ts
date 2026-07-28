@@ -1,21 +1,21 @@
 /**
- * Backend API sözleşmesinin TypeScript karşılığı.
+ * TypeScript mirror of the backend API contract.
  *
- * Kaynak: `backend/app/schemas.py` (ve yayınlanan `/openapi.json`).
- * Buradaki tipler ELLE yazıldı ama uydurulmadı — her biri şemadaki bir modele
- * birebir karşılık gelir. `src/api.ts` içindeki doğrulama, yanıtın gerçekten bu
- * şekle uyduğunu çalışma zamanında da kontrol eder; tip iddiası tek başına
- * güvence değildir.
+ * Source: `backend/app/schemas.py` (and the published `/openapi.json`).
+ * These types are hand-written but not invented — each one corresponds directly
+ * to a model in the schema. The validation in `src/api.ts` also checks at RUNTIME
+ * that a response really has this shape; a type assertion alone guarantees
+ * nothing.
  */
 
-/** `POST /predict` gövdesi. 34 alanın hepsi opsiyonel. */
+/** `POST /predict` body. All 34 fields are optional. */
 export type PredictRequest = Record<string, string | number | null>;
 
 /**
- * Tek bir feature'ın SHAP katkısı.
+ * One feature's SHAP contribution.
  *
- * `value` ve `baseValue` LOG-ODDS uzayındadır, olasılık değil:
- *   sum(value) + base_value = ham skor,  sigmoid(ham skor) = fraudProbability
+ * `value` and `base_value` live in LOG-ODDS space, not probability:
+ *   sum(value) + base_value = raw margin,  sigmoid(raw margin) = fraudProbability
  */
 export interface ShapValue {
   feature: string;
@@ -28,14 +28,14 @@ export type RiskLevel = "low" | "medium" | "high";
 export interface PredictResponse {
   fraud_probability: number;
   risk_level: RiskLevel;
-  /** 34 feature, abs(value) azalan sırada. */
+  /** All 34 features, sorted by descending abs(value). */
   shap_values: ShapValue[];
   /**
-   * Eğitim aralığı dışında kalan SAYISAL alan adları.
+   * Names of NUMERIC fields that fall outside the training range.
    *
-   * Yalnızca istekte GÖNDERİLEN alanlar kontrol edilir; kategorik alanlar
-   * burada görünmez (geçersiz kategori uyarı değil 422 üretir). Sıralama
-   * anlamlıdır: modelin gerçekten kullandığı alanlar başta gelir.
+   * Only fields actually SENT in the request are checked; categorical fields
+   * never appear here (an invalid category produces a 422, not a warning). The
+   * ordering is meaningful: fields the model actually uses come first.
    */
   out_of_distribution_warnings: string[];
 }
@@ -61,7 +61,7 @@ export interface DefaultInfo {
 export interface FeatureInfluenceEntry {
   split_count: number;
   gain: number;
-  /** `split_count > 0` — model bu feature'ı gerçekten kullandı mı? */
+  /** `split_count > 0` — did the model actually use this feature? */
   has_influence: boolean;
 }
 
@@ -82,9 +82,9 @@ export interface FairnessAttribute {
   feature: string;
   basis: string;
   rationale: string;
-  /** BEYAN: feature modele girdi olarak verildi. */
+  /** DECLARATION: the feature was handed to the model as an input. */
   used_as_model_feature: boolean;
-  /** ÖLÇÜM: eğitilmiş ağaçlar onu gerçekten kullandı mı? */
+  /** MEASUREMENT: did the trained trees actually split on it? */
   split_count: number;
   has_influence: boolean;
   severity?: string | null;
@@ -125,7 +125,7 @@ export interface ModelInfoResponse {
     pipeline_input_order: string[];
     categorical_features: string[];
     numeric_features: string[];
-    /** PII kolon ADLARI — sızıntı değil, "bunlar modele hiç girmedi" beyanı. */
+    /** PII column NAMES — not a leak, but a statement that they never reached the model. */
     dropped_columns: string[];
     target: string;
   };
@@ -153,15 +153,16 @@ export interface HealthResponse {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Hata                                                                       */
+/* Errors                                                                     */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Backend'in 422 gövdesi.
+ * The backend's 422 body.
  *
- * `input` ve `ctx` alanları BİLEREK yok: backend hatalı istekte gönderilen ham
- * değeri geri yansıtmıyor (sigorta talebi verisi log'lara/konsola sızmasın
- * diye). Elimizde yalnızca hangi alan (`loc`) ve ne yanlış (`msg`) var.
+ * The `input` and `ctx` fields are absent DELIBERATELY: the backend does not
+ * echo the submitted raw value back on a bad request, so claim data cannot leak
+ * into logs or a console. All we get is which field (`loc`) and what is wrong
+ * (`msg`).
  */
 export interface ValidationErrorItem {
   loc: string[];

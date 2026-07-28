@@ -1,48 +1,51 @@
-"""Model artefaktının yüklenmesi, şema normalizasyonu, tahmin ve SHAP.
+"""Artifact loading, schema normalisation, prediction and SHAP.
 
-NE YAPAR, NEDEN BÖYLE YAPAR
----------------------------
+WHAT IT DOES, AND WHY IT DOES IT THIS WAY
+-----------------------------------------
 
-1) ARTEFAKT YOLU SABİT, KULLANICI GİRDİSİNDEN GELMEZ
-   `MODELS_DIR` yalnızca `__file__`'dan türetilir. Yolu ortam değişkeninden ya
-   da istekten almak, path traversal / keyfi pickle yükleme demektir — ve
-   pickle yüklemek kod çalıştırmakla eşdeğerdir. Tek bir sabit yol, bu sınıf
-   saldırıyı tamamen kapatır.
+1) THE ARTIFACT PATH IS FIXED AND NEVER COMES FROM USER INPUT
+   `MODELS_DIR` is derived from `__file__` alone. Taking the path from an
+   environment variable or from a request means path traversal / arbitrary
+   pickle loading — and loading a pickle is equivalent to executing code. A
+   single hard-coded path closes that entire class of attack.
 
-2) TEK SEFER YÜKLENİR, FAIL-FAST
-   `ModelBundle.load()` uygulama açılışında (FastAPI `lifespan`) bir kez
-   çağrılır. Dosya yoksa ya da artefakt metadata ile tutarsızsa uygulama HİÇ
-   açılmaz. "Ayakta ama her isteğe 500 dönen" bir servis, açılmayan bir
-   servisten daha kötüdür: healthcheck yeşil görünür, sorun deploy'dan çok
-   sonra fark edilir.
+2) LOADED ONCE, FAIL-FAST
+   `ModelBundle.load()` is called once at application startup (FastAPI
+   `lifespan`). If a file is missing, or the artifact disagrees with the
+   metadata, the application does NOT start at all. A service that is "up but
+   returns 500 to every request" is worse than one that never starts: the
+   healthcheck looks green and the problem surfaces long after the deploy.
 
-   `shap.TreeExplainer` de burada bir kez kurulur. Her istekte kurmak, ağaç
-   yapısını her seferinde yeniden ayrıştırmak demektir (pahalı ve gereksiz).
+   `shap.TreeExplainer` is also constructed once here. Constructing it per
+   request would mean re-parsing the tree structure every time (expensive and
+   pointless).
 
-3) PIPELINE'IN DIŞINDA KALAN 4 ADIM (preprocessing_contract)
-   `pipeline.pkl` imputasyon ve encoding'i kapsar ama ham şemadan pipeline
-   girdisine geçişi KAPSAMAZ. `metadata.preprocessing_contract` bu adımları
-   makine-okunur olarak listeler. API katmanında durumları:
+3) THE FOUR STEPS THAT LIVE OUTSIDE THE PIPELINE (preprocessing_contract)
+   `pipeline.pkl` covers imputation and encoding, but it does NOT cover the step
+   from the raw schema to the pipeline input. `metadata.preprocessing_contract`
+   lists those steps machine-readably. Their status in the API layer:
 
-     drop_columns          -> TRIVIAL. Atılacak kolonlar (PII, ham tarihler,
-                              _c39, auto_model) API şemasında zaten YOK.
-                              İstemci gönderemez; `extra="forbid"` reddeder.
-     derive_year_features  -> TRIVIAL. API ham tarih değil doğrudan
-                              `incident_year` / `policy_bind_year` kabul eder,
-                              yani türetilecek bir şey yok (bkz. K2).
-     question_mark_to_nan  -> GERÇEKTEN UYGULANIR. `prepare_row()` içinde.
-     order_columns         -> GERÇEKTEN UYGULANIR. `prepare_row()` içinde.
+     drop_columns          -> TRIVIAL. The columns to drop (PII, raw dates,
+                              _c39, auto_model) are simply ABSENT from the API
+                              schema. A client cannot send them; `extra="forbid"`
+                              rejects the attempt.
+     derive_year_features  -> TRIVIAL. The API accepts `incident_year` /
+                              `policy_bind_year` directly rather than raw dates,
+                              so there is nothing to derive (see K2).
+     question_mark_to_nan  -> GENUINELY APPLIED, inside `prepare_row()`.
+     order_columns         -> GENUINELY APPLIED, inside `prepare_row()`.
 
-   Son iki adım atlanırsa hata SESSİZDİR: "?" string'i encoder tarafından
-   bilinmeyen kategori sayılıp -1'e kodlanır (imputer hiç devreye girmez),
-   yanlış kolon sırası ise tamamen yanlış feature'lara bakan bir tahmin üretir.
-   İkisi de exception fırlatmaz — bu yüzden sözleşme kodda değil, artefaktta
-   tutulur ve `_verify_contract()` ile açılışta doğrulanır.
+   If either of the last two is skipped, the failure is SILENT: the "?" string
+   gets treated by the encoder as an unknown category and encoded to -1 (the
+   imputer never runs), and a wrong column order produces a prediction that looks
+   at entirely the wrong features. Neither raises an exception — which is why the
+   contract lives in the artifact rather than in code, and is verified at startup
+   by `_verify_contract()`.
 
-4) ENCODING HÂLÂ YASAK
-   Buradaki hiçbir şey kategorik değeri sayıya çevirmez. Yapılan iş yalnızca
-   ŞEMA NORMALİZASYONUDUR (eksik alanı doldur, "?" -> NaN, kolonları sırala).
-   Sayıya çevirme işi baştan sona `Pipeline`'ın içindedir.
+4) MANUAL ENCODING IS STILL FORBIDDEN
+   Nothing in this file turns a categorical value into a number. All it does is
+   SCHEMA NORMALISATION (fill missing fields, "?" -> NaN, order the columns).
+   Turning values into numbers is, from start to finish, the `Pipeline`'s job.
 """
 
 from __future__ import annotations
@@ -68,7 +71,7 @@ from app.guardrails import Guardrail
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# Sabitler
+# Constants
 # --------------------------------------------------------------------------- #
 
 # backend/app/model.py -> backend/models/
@@ -76,24 +79,24 @@ MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 PIPELINE_PATH = MODELS_DIR / "pipeline.pkl"
 METADATA_PATH = MODELS_DIR / "metadata.json"
 
-# Kaynak veri setinde "bilinmiyor" bu string ile kodlanmış.
+# In the source dataset, "unknown" is encoded with this string.
 QUESTION_MARK = "?"
 
-# Modelin pozitif sınıfı (fraud_reported == 1 -> "Y").
+# The model's positive class (fraud_reported == 1 -> "Y").
 POSITIVE_CLASS_LABEL = 1
 
-# --- Risk eşikleri (K6) ---------------------------------------------------- #
+# --- Risk thresholds (K6) -------------------------------------------------- #
 #
-# DİKKAT — OLASILIKLAR KALİBRE DEĞİLDİR.
-# Model `scale_pos_weight ~= 3.04` ile eğitildi: azınlık (fraud) sınıfı 3 kat
-# ağırlıklandırıldı. Bu, PR-AUC'yi iyileştirir ama `predict_proba` çıktısını
-# YUKARI ŞİŞİRİR. Yani 0.71, "bu talebin %71 ihtimalle dolandırıcılık olduğu"
-# anlamına GELMEZ; yalnızca "diğer taleplere göre yüksek sırada" demektir.
+# CAUTION — THE PROBABILITIES ARE NOT CALIBRATED.
+# The model was trained with `scale_pos_weight ~= 3.04`: the minority (fraud)
+# class was weighted 3x. That improves PR-AUC but INFLATES the `predict_proba`
+# output. So 0.71 does NOT mean "this claim is 71% likely to be fraud"; it only
+# means "ranked high relative to other claims".
 #
-# Dolayısıyla aşağıdaki eşikler istatistiksel bir olasılık kesimi değil, bir
-# TRİYAJ politikasıdır. Kolayca değiştirilebilir olmaları için modül düzeyi
-# sabit tutuldular; iş kuralı değişirse tek yerden ayarlanır (ve /model-info
-# bu değerleri buradan okuyup yayınlar, frontend kendi kopyasını tutmaz).
+# The thresholds below are therefore a TRIAGE policy, not a statistical
+# probability cut. They are kept as module-level constants so they are easy to
+# change: if the business rule moves, it moves in one place (and /model-info
+# reads and publishes these values from here, so the frontend keeps no copy).
 RISK_THRESHOLD_MEDIUM = 0.35
 RISK_THRESHOLD_HIGH = 0.65
 RISK_RULE_DESCRIPTION = (
@@ -102,17 +105,18 @@ RISK_RULE_DESCRIPTION = (
     f"high: p >= {RISK_THRESHOLD_HIGH}"
 )
 CALIBRATION_WARNING = (
-    "Olasılıklar kalibre DEĞİLDİR. Model dengesiz sınıf ağırlığıyla "
-    "(scale_pos_weight ~= 3.04) eğitildi; bu, azınlık sınıfının olasılıklarını "
-    "sistematik olarak yukarı şişirir. fraud_probability mutlak bir olasılık "
-    "olarak değil, talepleri önceliklendirmek için bir SIRALAMA skoru olarak "
-    "okunmalıdır. Mutlak olasılık gerekiyorsa modelin ayrıca kalibre edilmesi "
-    "(ör. isotonic / Platt) şarttır."
+    "The probabilities are NOT calibrated. The model was trained with an "
+    "imbalanced class weight (scale_pos_weight ~= 3.04), which systematically "
+    "inflates the probabilities of the minority class. fraud_probability should "
+    "be read as a RANKING score for prioritising claims, not as an absolute "
+    "probability. If an absolute probability is required, the model must be "
+    "calibrated separately (e.g. isotonic / Platt)."
 )
 
-# `preprocessing_contract.caller_must_apply_before_predict` içinde beklediğimiz
-# adımlar. Artefakt yeniden eğitilip yeni bir adım eklenirse (ör. yeni bir
-# türetilmiş feature), API bunu sessizce atlamak yerine açılışta patlar.
+# The steps we expect inside
+# `preprocessing_contract.caller_must_apply_before_predict`. If the artifact is
+# retrained and a new step appears (e.g. a new derived feature), the API fails at
+# startup rather than skipping it silently.
 EXPECTED_CONTRACT_STEPS = {
     "drop_columns",
     "derive_year_features",
@@ -122,73 +126,77 @@ EXPECTED_CONTRACT_STEPS = {
 
 
 class ArtifactError(RuntimeError):
-    """Artefakt eksik ya da metadata ile tutarsız — uygulama açılmamalı."""
+    """The artifact is missing or disagrees with the metadata — do not start."""
 
 
 # --------------------------------------------------------------------------- #
-# SHAP çıktı şekli normalizasyonu (K7)
+# Normalising the SHAP output shape (K7)
 # --------------------------------------------------------------------------- #
 
 
 def _positive_class_index(model: Any) -> int:
-    """Pozitif sınıfın (`1`) `classes_` içindeki indeksi.
+    """Index of the positive class (`1`) within `classes_`.
 
-    Sabit `1` yazmıyoruz: sınıf sırası estimator'ın gördüğü etiketlere bağlıdır.
+    We do not hard-code `1`: the class order depends on the labels the estimator
+    was shown.
 
-    SESSİZ FALLBACK YOK (Codex C-2). Önceki hâli, etiket bulunamazsa "son sınıf"a
-    düşüyordu. O varsayım ikili problemlerde çoğu zaman doğru ama BU kodda
-    tehlikeliydi: yanlış indeks hem `predict_proba` sütununu hem SHAP eksenini
-    aynı anda kaydırır, dolayısıyla `_verify_shap_additivity` de aynı yanlış
-    ekseni kullanıp EŞİTLİĞİ SAĞLAR. Yani hata, kendi doğrulamasını atlatarak
-    "ters işaretli ama tutarlı" bir servis açardı.
+    NO SILENT FALLBACK (Codex C-2). The previous version fell back to "the last
+    class" when the label could not be found. That assumption is usually right
+    for binary problems but was dangerous HERE: a wrong index shifts both the
+    `predict_proba` column and the SHAP axis at the same time, so
+    `_verify_shap_additivity` would use the same wrong axis and the identity
+    would STILL HOLD. In other words the bug would slip past its own verification
+    and bring up a service that was "sign-flipped but self-consistent".
 
-    Artefakt `fraud_reported` alanını 0/1'e map'lediği için `classes_` bu
-    projede her zaman `[0, 1]`'dir; buraya düşmek artefaktın beklenmedik şekilde
-    değiştiği anlamına gelir ve doğru davranış açılmamaktır.
+    Because the artifact maps `fraud_reported` to 0/1, `classes_` is always
+    `[0, 1]` in this project; reaching this error means the artifact changed
+    unexpectedly, and the correct behaviour is not to start.
     """
     classes = getattr(model, "classes_", None)
     if classes is None:
         raise ArtifactError(
-            "Modelde `classes_` yok; pozitif sınıf indeksi belirlenemiyor. "
-            "Artefakt bir sklearn sınıflandırıcısı olmayabilir."
+            "The model has no `classes_`, so the positive class index cannot be "
+            "determined. The artifact may not be a scikit-learn classifier."
         )
     classes = np.asarray(classes)
     matches = np.flatnonzero(classes == POSITIVE_CLASS_LABEL)
     if not matches.size:
         raise ArtifactError(
-            f"Modelin sınıf etiketleri arasında pozitif sınıf "
-            f"({POSITIVE_CLASS_LABEL}) yok: classes_={classes.tolist()}. "
-            "Hangi sütunun 'fraud' olduğu tahmin edilemez; bir varsayımla devam "
-            "etmek olasılığı ve SHAP işaretlerini sessizce ters çevirirdi."
+            f"The positive class ({POSITIVE_CLASS_LABEL}) is not among the "
+            f"model's class labels: classes_={classes.tolist()}. Which column "
+            "means 'fraud' cannot be guessed; continuing on an assumption would "
+            "silently invert the probability and the SHAP signs."
         )
     return int(matches[0])
 
 
 def _select_positive_class(values: Any, base_values: Any, positive_index: int) -> tuple[np.ndarray, float]:
-    """SHAP çıktısından pozitif sınıfın katkılarını ŞEKLİ VARSAYMADAN seçer.
+    """Picks the positive class's contributions from the SHAP output WITHOUT
+    assuming a shape.
 
-    `TreeExplainer` ikili sınıflandırmada sürüme/backend'e göre farklı şekiller
-    döndürebilir; hepsini tek biçime indiriyoruz:
+    For binary classification `TreeExplainer` may return different shapes
+    depending on the version and backend; we reduce all of them to one form:
 
-        list/tuple            -> sınıf başına dizi, [positive_index] seçilir
-        ndarray (n, f, c)     -> son eksen sınıf, [..., positive_index]
-        ndarray (n, f)        -> ikili modelde zaten pozitif sınıfın log-odds'u
+        list/tuple            -> one array per class, [positive_index] is taken
+        ndarray (n, f, c)     -> last axis is class, [..., positive_index]
+        ndarray (n, f)        -> already the positive class log-odds in a binary
+                                 model
 
-    Bu kurulumda (shap 0.52 + lightgbm 4.6, objective='binary') ölçülen şekil
-    (1, 34) ve skaler base_value'dur — ama yanlış eksene indekslemek sessizce
-    işaretleri ters çeviren bir hata olurdu, o yüzden şekli kontrol ediyoruz.
-    Seçimin DOĞRU olduğu ayrıca toplanabilirlik ile kanıtlanır
-    (bkz. `_verify_shap_additivity`).
+    In this setup (shap 0.52 + lightgbm 4.6, objective='binary') the measured
+    shape is (1, 34) with a scalar base_value — but indexing the wrong axis would
+    be a bug that silently inverts the signs, so we check the shape. That the
+    choice is CORRECT is proven separately by additivity (see
+    `_verify_shap_additivity`).
     """
     if isinstance(values, (list, tuple)):
         values = values[positive_index]
     array = np.asarray(values, dtype=float)
     if array.ndim == 3:  # (n_rows, n_features, n_classes)
         array = array[..., positive_index]
-    if array.ndim == 2:  # (n_rows, n_features) -> tek satır istiyoruz
+    if array.ndim == 2:  # (n_rows, n_features) -> we want a single row
         array = array[0]
     if array.ndim != 1:
-        raise ArtifactError(f"Beklenmeyen SHAP değer şekli: {np.asarray(values).shape}")
+        raise ArtifactError(f"Unexpected SHAP value shape: {np.asarray(values).shape}")
 
     if isinstance(base_values, (list, tuple)):
         base_values = base_values[positive_index]
@@ -196,7 +204,7 @@ def _select_positive_class(values: Any, base_values: Any, positive_index: int) -
     if base.ndim == 0:
         base_value = float(base)
     elif base.ndim == 1:
-        # Tek satır tahmin ediyoruz: boyut 1 ise satır ekseni, değilse sınıf ekseni.
+        # We predict a single row: size 1 means the row axis, otherwise the class axis.
         base_value = float(base[0]) if base.size == 1 else float(base[positive_index])
     else:  # (n_rows, n_classes)
         base_value = float(base[0, positive_index])
@@ -205,12 +213,12 @@ def _select_positive_class(values: Any, base_values: Any, positive_index: int) -
 
 
 # --------------------------------------------------------------------------- #
-# Risk etiketi
+# Risk label
 # --------------------------------------------------------------------------- #
 
 
 def classify_risk(probability: float) -> str:
-    """Olasılığı `low` / `medium` / `high` triyaj etiketine çevirir."""
+    """Maps a probability to a `low` / `medium` / `high` triage label."""
     if probability >= RISK_THRESHOLD_HIGH:
         return "high"
     if probability >= RISK_THRESHOLD_MEDIUM:
@@ -224,11 +232,11 @@ def classify_risk(probability: float) -> str:
 
 
 class ModelBundle:
-    """Yüklenmiş pipeline + metadata + SHAP explainer'ı bir arada tutar.
+    """Holds the loaded pipeline, metadata and SHAP explainer together.
 
-    Neden tek nesne: üçü birbirine bağlıdır (explainer pipeline'ın modeline,
-    feature adları metadata'ya bakar). Ayrı global değişkenler tutmak, birinin
-    güncellenip diğerinin unutulmasına açık bir tasarım olurdu.
+    Why one object: the three are coupled (the explainer points at the pipeline's
+    model, the feature names point at the metadata). Keeping them in separate
+    globals would be a design that invites updating one and forgetting another.
     """
 
     def __init__(self, pipeline: Pipeline, metadata: dict[str, Any]) -> None:
@@ -245,37 +253,38 @@ class ModelBundle:
         self._model = pipeline.named_steps["model"]
         self._positive_index = _positive_class_index(self._model)
 
-        # `question_mark_to_nan` kolonları KODA GÖMÜLMEZ, sözleşmeden okunur.
-        # Model yeniden eğitilip bu liste değişirse API otomatik uyar.
+        # The `question_mark_to_nan` columns are NOT HARD-CODED; they are read
+        # from the contract. If the model is retrained and that list changes, the
+        # API warns automatically.
         self.question_mark_columns: list[str] = list(
             _contract_step(metadata, "question_mark_to_nan")["columns"]
         )
 
-        # Faz 2 — OOD kontrolü. Aralıklar guardrail'in içine gömülmez,
-        # metadata'dan okunur: model yeniden eğitilirse eşikler kendiliğinden
-        # güncellenir (bkz. `guardrails.py`).
+        # Phase 2 — OOD checking. The ranges are not embedded in the guardrail;
+        # they are read from the metadata, so retraining the model updates the
+        # thresholds by itself (see `guardrails.py`).
         self.guardrail = Guardrail(metadata)
 
         self.explainer = shap.TreeExplainer(self._model)
 
-        # shap'in LightGBM dalı her çağrıda `explainer.expected_value`'ı yeniden
-        # ATAR. Değer hep aynı olsa da bu bir paylaşılan-durum mutasyonudur;
-        # FastAPI senkron endpoint'leri thread havuzunda koştuğu için eş zamanlı
-        # istekler aynı explainer'a girer. Tek satırlık bir açıklama saniyenin
-        # binde biri sürüyor, kilidin maliyeti ihmal edilebilir — belirsiz bir
-        # yarış durumuna tercih edilir.
+        # shap's LightGBM branch REASSIGNS `explainer.expected_value` on every
+        # call. Even though the value is always the same, that is a mutation of
+        # shared state; because FastAPI runs synchronous endpoints in a thread
+        # pool, concurrent requests hit the same explainer. Explaining a single
+        # row takes about a millisecond, so the cost of the lock is negligible —
+        # preferable to an undefined race.
         self._shap_lock = threading.Lock()
 
-    # -- yükleme ------------------------------------------------------------ #
+    # -- loading ------------------------------------------------------------ #
 
     @classmethod
     def load(cls) -> ModelBundle:
-        """Artefaktları sabit yoldan yükler ve tutarlılığını doğrular."""
+        """Loads the artifacts from the fixed path and verifies their consistency."""
         missing = [p.name for p in (PIPELINE_PATH, METADATA_PATH) if not p.is_file()]
         if missing:
             raise ArtifactError(
-                f"Model artefaktı bulunamadı: {missing} (aranan dizin: {MODELS_DIR}). "
-                "Önce `python backend/train_pipeline.py` çalıştırın."
+                f"Model artifact not found: {missing} (searched in: {MODELS_DIR}). "
+                "Run `python backend/train_pipeline.py` first."
             )
 
         pipeline = joblib.load(PIPELINE_PATH)
@@ -292,34 +301,35 @@ class ModelBundle:
     def _verify_transform_equivalence(self) -> None:
         """`preprocessor.transform` + `model.predict_proba` == `pipeline.predict_proba`.
 
-        `predict()` performans için pipeline'ı iki adıma ayırıyor (bkz.
-        `_transform`). Bu kısayolun tam Pipeline çağrısıyla BİT BAZINDA aynı
-        sonucu verdiğini açılışta kanıtlıyoruz. `pytest.approx` değil, tam
-        eşitlik: en ufak sapma bile ayrıştırmanın yanlış olduğu anlamına gelir
-        (ör. pipeline'a ileride üçüncü bir adım eklenirse bu kontrol patlar).
+        For performance, `predict()` splits the pipeline into two steps (see
+        `_transform`). At startup we prove that this shortcut produces a
+        BIT-IDENTICAL result to the full Pipeline call. Exact equality, not
+        `pytest.approx`: even the smallest deviation means the split is wrong
+        (e.g. this check fires if a third step is ever added to the pipeline).
         """
         frame = self.prepare_row({})
         via_pipeline = self.pipeline.predict_proba(frame)
         via_steps = self._model.predict_proba(self._transform(frame))
         if not np.array_equal(via_pipeline, via_steps):
             raise ArtifactError(
-                "preprocessor+model ayrıştırması pipeline.predict_proba ile aynı sonucu "
-                f"vermiyor: {via_pipeline!r} != {via_steps!r}. Pipeline'da beklenmeyen "
-                "bir adım olabilir; predict() kısayolu güvenli değil."
+                "The preprocessor+model split does not match pipeline.predict_proba: "
+                f"{via_pipeline!r} != {via_steps!r}. The pipeline may contain an "
+                "unexpected step; the predict() shortcut is not safe."
             )
 
     def _warn_on_library_version_drift(self) -> None:
-        """Çalışma zamanı sürümleri eğitim sürümlerinden saptıysa UYARIR.
+        """WARNS when the runtime versions drift from the training versions.
 
-        NEDEN PATLATMIYORUZ: `pipeline.pkl` bir pickle'dır ve içinde sklearn /
-        lightgbm / numpy sınıfları serileşmiştir. Farklı bir sürüm çoğu zaman
-        sorunsuz açar, bazen sessizce farklı davranır, nadiren hiç açılmaz.
-        Her sapmada açılışı reddetmek Faz 7'de (Docker imajı) gereksiz yere
-        deploy'u kilitlerdi. Ama sessiz kalmak da olmaz: sessiz sapma tam olarak
-        "model neden farklı skor veriyor?" sorusunun en pahalı hâlidir.
+        WHY WE DO NOT FAIL: `pipeline.pkl` is a pickle, and scikit-learn /
+        lightgbm / numpy classes are serialised inside it. A different version
+        usually loads fine, sometimes behaves differently in silence, and rarely
+        fails to load at all. Refusing to start on every drift would needlessly
+        block the Phase 7 deploy (Docker image). But staying silent is not an
+        option either: silent drift is precisely the most expensive form of
+        "why is the model scoring differently?".
 
-        Uyarı `/health` yanıtına EKLENMEZ — API sözleşmesi dar kalır, bu bir
-        operatör sinyalidir, istemci verisi değil.
+        The warning is NOT added to the `/health` response — the API contract
+        stays narrow; this is an operator signal, not client data.
         """
         recorded: dict[str, str] = self.metadata.get("library_versions", {})
         runtime = {
@@ -338,96 +348,96 @@ class ModelBundle:
         }
         if drift:
             details = ", ".join(
-                f"{name}: eğitim={trained} çalışma={current}"
+                f"{name}: trained={trained} runtime={current}"
                 for name, (trained, current) in sorted(drift.items())
             )
             logger.warning(
-                "Kütüphane sürüm sapması tespit edildi (%d paket). pipeline.pkl bu "
-                "sürümlerle üretilmedi; tahminler sessizce farklılaşabilir. %s",
+                "Library version drift detected (%d packages). pipeline.pkl was not "
+                "produced with these versions; predictions may differ silently. %s",
                 len(drift),
                 details,
             )
 
     def _verify_contract(self) -> None:
-        """Sözleşmedeki adımların tam olarak beklediklerimiz olduğunu doğrular."""
+        """Verifies that the contract steps are exactly the ones we expect."""
         steps = {
             step["step"]
             for step in self.metadata["preprocessing_contract"]["caller_must_apply_before_predict"]
         }
         if steps != EXPECTED_CONTRACT_STEPS:
             raise ArtifactError(
-                "preprocessing_contract adımları beklenenden farklı. "
-                f"beklenen={sorted(EXPECTED_CONTRACT_STEPS)} bulunan={sorted(steps)}. "
-                "API katmanı bilmediği bir hazırlık adımını sessizce atlayamaz."
+                "The preprocessing_contract steps differ from what was expected. "
+                f"expected={sorted(EXPECTED_CONTRACT_STEPS)} found={sorted(steps)}. "
+                "The API layer cannot silently skip a preparation step it does not know."
             )
 
-        # `order_columns` sözleşmesi ile gerçek girdi sırası aynı olmalı.
+        # The `order_columns` contract must agree with the actual input order.
         ordered = _contract_step(self.metadata, "order_columns")["columns"]
         if list(ordered) != list(self.input_order):
-            raise ArtifactError("order_columns sözleşmesi pipeline_input_order ile uyuşmuyor.")
+            raise ArtifactError("order_columns does not agree with pipeline_input_order.")
 
         unknown_qm = set(self.question_mark_columns) - set(self.input_order)
         if unknown_qm:
-            raise ArtifactError(f"question_mark_to_nan'da bilinmeyen kolon(lar): {sorted(unknown_qm)}")
+            raise ArtifactError(f"Unknown column(s) in question_mark_to_nan: {sorted(unknown_qm)}")
 
     def _verify_feature_alignment(self) -> None:
-        """defaults / transformed adlar / kolon sırası birbirini tutuyor mu?"""
+        """Do defaults / transformed names / column order all agree?"""
         if set(self.defaults) != set(self.input_order):
-            raise ArtifactError("metadata.defaults, pipeline_input_order ile aynı kolon kümesi değil.")
+            raise ArtifactError("metadata.defaults is not the same column set as pipeline_input_order.")
 
         transformed = list(self._preprocessor.get_feature_names_out())
         if transformed != list(self.metadata["feature_list"]["transformed_order"]):
             raise ArtifactError(
-                "Pipeline'ın ürettiği transformed kolon sırası metadata ile uyuşmuyor."
+                "The transformed column order produced by the pipeline does not match the metadata."
             )
         if len(transformed) != len(self.display_names):
             raise ArtifactError(
-                "transformed_display_names uzunluğu transformed_order ile eşleşmiyor: "
+                "transformed_display_names length does not match transformed_order: "
                 f"{len(self.display_names)} != {len(transformed)}"
             )
-        # SHAP adlarında cat__/remainder__ öneki SIZMAMALI (K7).
+        # The cat__/remainder__ prefixes MUST NOT leak into the SHAP names (K7).
         leaked = [n for n in self.display_names if n.startswith(("cat__", "remainder__"))]
         if leaked:
-            raise ArtifactError(f"transformed_display_names'te ham önek kalmış: {leaked}")
+            raise ArtifactError(f"Raw prefix left in transformed_display_names: {leaked}")
 
-        # AD EŞLEMESİ POZİSYON BAZINDA DOĞRULANIR (Codex C-3).
+        # NAME ALIGNMENT IS VERIFIED BY POSITION (Codex C-3).
         #
-        # Yukarıdaki iki kontrol yalnızca UZUNLUĞA ve ÖNEKE bakıyordu; ikisi de
-        # adların SIRASI hakkında hiçbir şey söylemez. Metadata'daki liste
-        # permüte edilse (aynı adlar, farklı sıra) uygulama sorunsuz açılıyor,
-        # skorlar doğru kalıyor ama `/predict` her SHAP katkısını YANLIŞ
-        # feature'a atfediyordu — bu demonun tam da satmaya çalıştığı şeyin
-        # sessizce yalan söylemesi demek.
+        # The two checks above only look at LENGTH and PREFIX; neither says
+        # anything about the ORDER of the names. If the metadata list were
+        # permuted (same names, different order), the application would start
+        # cleanly and the scores would stay correct — but `/predict` would
+        # attribute every SHAP contribution to the WRONG feature, which means the
+        # very thing this demo is selling would be lying silently.
         #
-        # `_verify_shap_additivity` bunu yakalayamaz: toplam değişmediği için
-        # eşitlik korunur. Testler yakalıyordu (bkz.
-        # `test_shap_feature_names_follow_the_transformed_column_order`) ama
-        # açılış yakalamıyordu; yani bozuk bir artefaktla production'a çıkmak
-        # mümkündü. Doğrusu, adları metadata'ya güvenerek DEĞİL pipeline'ın
-        # kendi çıktısından türetip karşılaştırmak.
+        # `_verify_shap_additivity` cannot catch this: the sum is unchanged, so
+        # the identity still holds. The tests did catch it (see
+        # `test_shap_feature_names_follow_the_transformed_column_order`) but
+        # startup did not; a broken artifact could therefore reach production.
+        # The fix is to derive the names from the pipeline's own output rather
+        # than TRUSTING the metadata, and compare.
         expected_display = [name.split("__", 1)[-1] for name in transformed]
         if self.display_names != expected_display:
             mismatches = [
-                f"pozisyon {position}: metadata={actual!r} pipeline={expected!r}"
+                f"position {position}: metadata={actual!r} pipeline={expected!r}"
                 for position, (actual, expected) in enumerate(
                     zip(self.display_names, expected_display, strict=True)
                 )
                 if actual != expected
             ]
             raise ArtifactError(
-                "transformed_display_names, pipeline'ın kolon sırasıyla eşleşmiyor "
-                f"({len(mismatches)} pozisyon). SHAP katkıları yanlış feature adlarıyla "
-                f"yayınlanırdı. İlk farklar: {mismatches[:5]}"
+                "transformed_display_names does not match the pipeline's column order "
+                f"({len(mismatches)} positions). SHAP contributions would have been "
+                f"published under the wrong feature names. First differences: {mismatches[:5]}"
             )
 
     def _verify_shap_additivity(self) -> None:
-        """Pozitif sınıf seçiminin DOĞRU olduğunu matematiksel olarak kanıtlar.
+        """Proves mathematically that the positive-class selection is CORRECT.
 
-        SHAP'in temel özdeşliği: sum(shap) + base_value = modelin ham skoru
-        (log-odds). Yanlış sınıfı/ekseni seçseydik bu eşitlik bozulurdu. Bunu
-        açılışta bir kez, varsayılan satır üzerinde kontrol ediyoruz — hatayı
-        production'da 34 ters işaretli SHAP değeri olarak görmektense burada
-        açılış hatası olarak görmek çok daha ucuz.
+        SHAP's fundamental identity: sum(shap) + base_value = the model's raw
+        margin (log-odds). Had we picked the wrong class or axis, that identity
+        would break. We check it once at startup on the default row — seeing the
+        bug here as a startup error is far cheaper than seeing it in production
+        as 34 sign-flipped SHAP values.
         """
         frame = self.prepare_row({})
         transformed = self._transform(frame)
@@ -435,63 +445,64 @@ class ModelBundle:
         values, base_value = self._shap_for_transformed(transformed)
 
         margin = float(values.sum() + base_value)
-        # sigmoid(margin) LightGBM'in binary objective'inde predict_proba'ya eşit.
+        # For LightGBM's binary objective, sigmoid(margin) equals predict_proba.
         reconstructed = 1.0 / (1.0 + math.exp(-margin))
         if abs(reconstructed - probability) > 1e-6:
             raise ArtifactError(
-                "SHAP toplanabilirlik kontrolü başarısız: "
+                "SHAP additivity check failed: "
                 f"sigmoid(sum(shap)+base)={reconstructed:.9f} != predict_proba={probability:.9f}. "
-                "Muhtemelen yanlış sınıf ekseni seçildi."
+                "The wrong class axis was most likely selected."
             )
 
-    # -- girdi hazırlığı ---------------------------------------------------- #
+    # -- input preparation -------------------------------------------------- #
 
     def prepare_row(self, payload: dict[str, Any]) -> pd.DataFrame:
-        """Doğrulanmış istek gövdesini pipeline'ın beklediği tek satırlık
-        DataFrame'e çevirir.
+        """Converts a validated request body into the single-row DataFrame the
+        pipeline expects.
 
-        `payload` anahtarları metadata kolon adlarıdır (Pydantic
-        `model_dump(by_alias=True)` sayesinde `capital-gains` tireli hâliyle
-        gelir).
+        The `payload` keys are metadata column names (thanks to Pydantic's
+        `model_dump(by_alias=True)`, `capital-gains` arrives hyphenated).
 
-        Uygulanan sözleşme adımları:
-          * question_mark_to_nan  -> "?" gönderilen alan NaN yapılır
-          * order_columns         -> kolonlar `pipeline_input_order` sırasında
+        Contract steps applied here:
+          * question_mark_to_nan  -> a field sent as "?" becomes NaN
+          * order_columns         -> columns follow `pipeline_input_order`
 
-        İKİ FARKLI "EKSİK" AYRIMI (K3 vs K4):
-          alan hiç gönderilmedi / null  -> metadata.defaults değeri (medyan/mod)
-          alan "?" gönderildi           -> NaN, pipeline'ın SimpleImputer'ı
-        Sonuç bu modelde aynı yere çıkabilir (imputer da mod kullanıyor) ama
-        anlamları farklıdır ve doldurma stratejisi değişirse davranış da
-        doğru şekilde ayrışır.
+        TWO DIFFERENT KINDS OF "MISSING" (K3 vs K4):
+          field never sent / null  -> the metadata.defaults value (median/mode)
+          field sent as "?"        -> NaN, handled by the pipeline's SimpleImputer
+        In this model both can end up at the same value (the imputer also uses the
+        mode), but they mean different things, and if the filling strategy changes
+        the behaviour diverges correctly.
         """
         record: dict[str, Any] = {}
         for column in self.input_order:
             value = payload.get(column)
             if value is None:
-                # K3 — alan yok: eğitim setinden gelen medyan/mod.
+                # K3 — field absent: median/mode from the training set.
                 value = self.defaults[column]
             elif column in self.question_mark_columns and value == QUESTION_MARK:
-                # K4 — alan "bilinmiyor": pipeline imputer'ına devret.
+                # K4 — field is "unknown": hand it to the pipeline's imputer.
                 value = np.nan
             record[column] = value
 
-        # `columns=` ile inşa etmek `order_columns` adımını garanti eder.
+        # Building with `columns=` guarantees the `order_columns` step.
         return pd.DataFrame([record], columns=self.input_order)
 
-    # -- tahmin ------------------------------------------------------------- #
+    # -- prediction --------------------------------------------------------- #
 
     def _shap_for_transformed(self, transformed: pd.DataFrame) -> tuple[np.ndarray, float]:
-        """Dönüştürülmüş satır için pozitif sınıfın SHAP katkıları + base value.
+        """Positive-class SHAP contributions + base value for a transformed row.
 
-        Girdi olarak HAM satırı değil, ZATEN DÖNÜŞTÜRÜLMÜŞ matrisi alır: bu
-        sayede modelin skorladığı matris ile explainer'ın açıkladığı matris
-        aynı nesnedir — "aynı olmalı" bir yorum değil, kodun yapısı.
+        It takes the ALREADY TRANSFORMED matrix rather than the raw row: that way
+        the matrix the model scores and the matrix the explainer explains are the
+        same object — "they must be the same" becomes a structural property of
+        the code rather than a comment.
         """
         with self._shap_lock:
-            # `explainer(X)` (Explanation API) tercih edildi: `shap_values()`
-            # LightGBM ikili modellerde her çağrıda bir UserWarning basıyor —
-            # her istekte log kirliliği. İkisi sayısal olarak birebir aynı.
+            # The `explainer(X)` (Explanation API) form is preferred:
+            # `shap_values()` emits a UserWarning on every call for binary
+            # LightGBM models — log noise on every request. The two are
+            # numerically identical.
             explanation = self.explainer(transformed)
             values, base_value = _select_positive_class(
                 explanation.values, explanation.base_values, self._positive_index
@@ -499,31 +510,30 @@ class ModelBundle:
         return values, base_value
 
     def _transform(self, frame: pd.DataFrame) -> pd.DataFrame:
-        """Hazırlanmış satırı pipeline'ın KENDİ preprocessor adımıyla dönüştürür.
+        """Transforms the prepared row with the pipeline's OWN preprocessor step.
 
-        ELLE ENCODING YASAĞI İHLAL EDİLMİYOR: burada çalışan şey pipeline'ın
-        içindeki `ColumnTransformer`'ın ta kendisi (imputer + OrdinalEncoder).
-        Kendi encoding sözlüğümüzü yazmıyoruz, sadece pipeline'ın iki adımını
-        ayrı ayrı çağırıyoruz.
+        THE MANUAL-ENCODING BAN IS NOT VIOLATED: what runs here is the very
+        `ColumnTransformer` inside the pipeline (imputer + OrdinalEncoder). We are
+        not writing our own encoding dictionary, only calling two of the
+        pipeline's steps separately.
 
-        NEDEN AYRI ÇAĞIRIYORUZ: `pipeline.predict_proba(frame)` preprocessor'ı
-        bir kez, ardından SHAP için ikinci kez çalıştırmak gerekiyordu — istek
-        başına aynı dönüşüm iki kez. Bir kez dönüştürüp aynı matrisi hem modele
-        hem explainer'a vermek yalnızca daha hızlı değil, aynı zamanda
-        "açıklanan şey ile skorlanan şey aynıdır" garantisini kod seviyesinde
-        kesinleştirir.
+        WHY CALL THEM SEPARATELY: `pipeline.predict_proba(frame)` would run the
+        preprocessor once, and SHAP would need it run a second time — the same
+        transform twice per request. Transforming once and handing the same matrix
+        to both the model and the explainer is not only faster, it also makes
+        "what is explained is what was scored" a guarantee at the code level.
 
-        `_verify_transform_equivalence()` bu ayrıştırmanın
-        `pipeline.predict_proba` ile BİT BAZINDA aynı sonucu verdiğini açılışta
-        doğrular; yani kısayol sessizce sapamaz.
+        `_verify_transform_equivalence()` proves at startup that this split
+        produces a BIT-IDENTICAL result to `pipeline.predict_proba`, so the
+        shortcut cannot drift silently.
         """
         return self._preprocessor.transform(frame)
 
     def predict(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Tek bir talebi skorlar ve SHAP açıklamasıyla birlikte açıklar.
+        """Scores a single claim and explains it with SHAP contributions.
 
-        Dönen sözlük doğrudan `PredictResponse` şemasına uyar; HTTP katmanı
-        hiçbir hesaplama yapmaz.
+        The returned dict maps directly onto the `PredictResponse` schema; the
+        HTTP layer performs no computation.
         """
         frame = self.prepare_row(payload)
         transformed = self._transform(frame)
@@ -533,11 +543,11 @@ class ModelBundle:
 
         if values.shape[0] != len(self.display_names):
             raise ArtifactError(
-                f"SHAP {values.shape[0]} değer döndürdü, {len(self.display_names)} bekleniyordu."
+                f"SHAP returned {values.shape[0]} values, {len(self.display_names)} were expected."
             )
 
-        # Tüm feature'lar döner (frontend kaçını göstereceğine kendi karar
-        # verir), abs(value) azalan sırada — en etkili katkı ilk sırada.
+        # Every feature is returned (the frontend decides how many to show),
+        # sorted by descending abs(value) — the strongest contribution first.
         shap_values = [
             {"feature": name, "value": float(value), "base_value": base_value}
             for name, value in zip(self.display_names, values, strict=True)
@@ -548,22 +558,22 @@ class ModelBundle:
             "fraud_probability": probability,
             "risk_level": classify_risk(probability),
             "shap_values": shap_values,
-            # OOD kontrolü HAM payload üzerinde yapılır, `frame` üzerinde değil:
-            # `prepare_row()` eksik alanları varsayılanla doldurduğu için
-            # dönüştürülmüş satırda "kullanıcı bunu gönderdi mi?" bilgisi
-            # kaybolur. Guardrail'in cevaplaması gereken soru tam olarak budur.
+            # The OOD check runs on the RAW payload, not on `frame`: because
+            # `prepare_row()` fills missing fields with defaults, the transformed
+            # row no longer records "did the user actually send this?". That is
+            # exactly the question the guardrail has to answer.
             "out_of_distribution_warnings": self.guardrail.check(payload),
         }
 
 
 # --------------------------------------------------------------------------- #
-# Yardımcılar
+# Helpers
 # --------------------------------------------------------------------------- #
 
 
 def _contract_step(metadata: dict[str, Any], name: str) -> dict[str, Any]:
-    """`preprocessing_contract` içinden adı verilen adımı getirir."""
+    """Fetches the named step from `preprocessing_contract`."""
     for step in metadata["preprocessing_contract"]["caller_must_apply_before_predict"]:
         if step["step"] == name:
             return step
-    raise ArtifactError(f"preprocessing_contract'ta '{name}' adımı yok.")
+    raise ArtifactError(f"preprocessing_contract has no '{name}' step.")
