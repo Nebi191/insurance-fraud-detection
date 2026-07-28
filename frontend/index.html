@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sigorta Talebi Dolandırıcılık Skorlaması</title>
+    <meta
+      name="description"
+      content="LightGBM tabanlı sigorta talebi dolandırıcılık skorlaması — SHAP açıklamalı, dağılım dışı girdi uyarılı."
+    />
+    <script>
+      // Tema, React yüklenmeden ÖNCE uygulanır. Aksi hâlde koyu tema seçili bir
+      // kullanıcı ilk boyamada beyaz bir flaş görür (FOUC).
+      (() => {
+        const saved = localStorage.getItem("theme");
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        if (saved === "dark" || (saved === null && prefersDark)) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

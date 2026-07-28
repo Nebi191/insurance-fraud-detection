@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+
+# Netlify (Faz 7)
+.netlify
+
+# Ortam değişkenleri — VITE_API_URL burada tutulur, repoya girmez.
+.env
+.env.local
+.env.*.local
