@@ -78,9 +78,9 @@ artefakt yükleme, imputasyon ve SHAP `model.py`'ın işidir.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # --------------------------------------------------------------------------- #
 # CLAUDE.md'deki örnek istek — Swagger UI'da "Try it out" için hazır gelsin.
@@ -116,6 +116,36 @@ class PredictRequest(BaseModel):
         extra="forbid",
         json_schema_extra={"examples": [PREDICT_REQUEST_EXAMPLE]},
     )
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_booleans(cls, value: Any) -> Any:
+        """`true` / `false` sayısal alanlarda sessizce 1 / 0 olmasın (Codex F2-1).
+
+        ÖLÇÜLEN DAVRANIŞ (düzeltmeden önce):
+
+            {"witnesses": true}          -> 200, uyarı yok       ("1 tanık")
+            {"total_claim_amount": true} -> 200, OOD uyarısı!     (1 < 1920)
+            {"capital-gains": false}     -> 200, uyarı yok       ("0 kazanç")
+
+        Pydantic'in varsayılan (lax) modu JSON `true` değerini sayısal alanlarda
+        1'e çeviriyordu. Bu iki ayrı soruna yol açıyordu:
+
+          * `guardrails.py`'daki bool koruması HTTP yolunda ETKİSİZDİ — guardrail
+            değeri zaten `int` olarak alıyordu, `bool` olduğunu göremiyordu.
+          * Daha temeli: `witnesses: true` anlamlı bir girdi DEĞİL. Sessizce
+            "1 tanık" saymak, bu dosyanın `Literal` gerekçesiyle aynı hatayı
+            yapmak olurdu — "sessiz saçmalık yerine 422 dönmek doğrusu".
+
+        `strict=True` KULLANILMADI: o mod int -> float dönüşümünü de reddederdi
+        ve `total_claim_amount: 55000` gibi tamamen geçerli bir JSON girdisi
+        kırılırdı. Yasak yalnızca `bool`a odaklı tutuldu.
+        """
+        if isinstance(value, bool):
+            raise ValueError(
+                "boolean değer kabul edilmiyor; bu alan sayı ya da kategori bekler"
+            )
+        return value
 
     # --- Poliçe / müşteri ------------------------------------------------- #
 
@@ -355,10 +385,14 @@ class PredictResponse(BaseModel):
     # yanlış olur.
     out_of_distribution_warnings: list[str] = Field(
         description=(
-            "Eğitim aralığının dışında kalan SAYISAL alan adları. Kategorik "
-            "alanlar API şemasında kapalı olduğundan burada görünmez — geçersiz "
-            "bir kategori uyarı değil 422 üretir. Faz 1'de her zaman boş döner; "
-            "guardrails.py (Faz 2) dolduracak."
+            "Modelin eğitimde görmediği aralıkta kalan alan adları. Yalnızca "
+            "İSTEKTE GÖNDERİLEN sayısal alanlar kontrol edilir: verilmeyen alanlar "
+            "eğitim medyanı/moduyla doldurulduğu için tanım gereği aralık içindedir. "
+            "Kategorik alanlar burada görünmez — geçersiz bir kategori uyarı değil "
+            "422 üretir. Sıralama anlamlıdır: modelin gerçekten kullandığı alanlar "
+            "başta, hiç kullanmadıkları (feature_influence.has_influence=false) "
+            "sonda gelir. Uyarı tahmini engellemez; skor yine döner ve temkinli "
+            "okunmalıdır."
         )
     )
 

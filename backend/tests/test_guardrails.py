@@ -290,6 +290,48 @@ def test_infinity_is_flagged(guardrail: Guardrail) -> None:
     assert guardrail.check({"capital-loss": -math.inf}) == ["capital-loss"]
 
 
+def test_huge_integers_are_flagged_not_crashed(guardrail: Guardrail) -> None:
+    """Float'a sığmayan devasa `int` istisna değil uyarı üretmeli (Codex F2-3).
+
+    `float(10**10000)` `OverflowError` fırlatır. HTTP yolundan erişilemez
+    (Pydantic sınırları çok daha dar, JSON kodlayıcı zaten patlar) ama bu modül
+    HTTP'siz de çağrılabiliyor ve bir OOD tespit katmanının aşırı büyük girdide
+    çökmesi ironik olurdu.
+    """
+    assert guardrail.check({"age": 10**10000}) == ["age"]
+    assert guardrail.check({"capital-loss": -(10**10000)}) == ["capital-loss"]
+
+
+def test_booleans_are_rejected_over_http_not_silently_coerced(
+    client: TestClient,
+) -> None:
+    """`true` sayısal alanda 1 olarak SKORLANMAMALI (Codex F2-1).
+
+    ÖLÇÜLEN DAVRANIŞ (düzeltmeden önce): Pydantic'in lax modu `true`yu 1'e
+    çeviriyordu, yani `guardrails.py`'daki bool koruması HTTP yolunda hiç
+    devreye girmiyordu — guardrail değeri zaten `int` olarak alıyordu.
+
+        {"witnesses": true}          -> 200, uyarı yok
+        {"total_claim_amount": true} -> 200, OOD uyarısı (1 < 1920)
+        {"capital-gains": false}     -> 200, uyarı yok
+
+    Bu testi guardrail seviyesinde değil ENDPOINT seviyesinde yazmak şart:
+    `Guardrail.check()` doğrudan çağrıldığında bool'u zaten atlıyordu ve o test
+    yeşil kalarak gerçek açığı gizliyordu.
+    """
+    for field in ("witnesses", "total_claim_amount", "capital-gains", "bodily_injuries"):
+        for value in (True, False):
+            response = client.post("/predict", json={field: value})
+            assert response.status_code == 422, (
+                f"{field}={value} kabul edildi ({response.status_code}) — "
+                "boolean sessizce sayıya dönüştürülüyor"
+            )
+
+    # Gerçek sayılar etkilenmemeli.
+    assert client.post("/predict", json={"witnesses": 1}).status_code == 200
+    assert client.post("/predict", json={"capital-gains": 0}).status_code == 200
+
+
 def test_booleans_are_not_treated_as_numbers(guardrail: Guardrail) -> None:
     """`True` sessizce 1 gibi karşılaştırılmamalı.
 

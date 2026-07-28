@@ -120,7 +120,16 @@ class Guardrail:
                 # sessizce yanlış karşılaştırma yapmaktansa atlamak doğru.
                 continue
 
-            numeric = float(value)
+            try:
+                numeric = float(value)
+            except OverflowError:
+                # `10**10000` gibi devasa bir `int` float'a sığmaz (Codex F2-3).
+                # HTTP yolundan erişilemez (Pydantic sınırları çok daha dar ve
+                # JSON kodlayıcı zaten patlar), ama bu modül HTTP'siz de
+                # çağrılabiliyor. Aralığın dışında olduğu kesin: işaretle, patlama.
+                flagged.append(name)
+                continue
+
             if math.isnan(numeric):
                 # NaN her karşılaştırmada False verir; kontrol etmeseydik
                 # "aralık içinde" sayılıp SESSİZCE geçerdi.
