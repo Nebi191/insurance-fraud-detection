@@ -63,6 +63,8 @@ import shap
 import sklearn
 from sklearn.pipeline import Pipeline
 
+from app.guardrails import Guardrail
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +250,11 @@ class ModelBundle:
         self.question_mark_columns: list[str] = list(
             _contract_step(metadata, "question_mark_to_nan")["columns"]
         )
+
+        # Faz 2 — OOD kontrolü. Aralıklar guardrail'in içine gömülmez,
+        # metadata'dan okunur: model yeniden eğitilirse eşikler kendiliğinden
+        # güncellenir (bkz. `guardrails.py`).
+        self.guardrail = Guardrail(metadata)
 
         self.explainer = shap.TreeExplainer(self._model)
 
@@ -541,10 +548,11 @@ class ModelBundle:
             "fraud_probability": probability,
             "risk_level": classify_risk(probability),
             "shap_values": shap_values,
-            # Faz 2: guardrails.py burayı dolduracak. Faz 1'de alan sözleşmede
-            # var ama HER ZAMAN boştur — frontend şemaya karşı geliştirebilsin
-            # diye şimdiden duruyor. Sahte/placeholder uyarı üretilmez.
-            "out_of_distribution_warnings": [],
+            # OOD kontrolü HAM payload üzerinde yapılır, `frame` üzerinde değil:
+            # `prepare_row()` eksik alanları varsayılanla doldurduğu için
+            # dönüştürülmüş satırda "kullanıcı bunu gönderdi mi?" bilgisi
+            # kaybolur. Guardrail'in cevaplaması gereken soru tam olarak budur.
+            "out_of_distribution_warnings": self.guardrail.check(payload),
         }
 
 

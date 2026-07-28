@@ -253,18 +253,24 @@ def test_predict_is_deterministic(client: TestClient) -> None:
     assert first == second
 
 
-def test_out_of_distribution_warnings_is_empty_in_phase_1(client: TestClient) -> None:
-    """Alan sözleşmede var ama Faz 1'de HER ZAMAN boş.
+def test_out_of_distribution_warnings_fire_end_to_end(client: TestClient) -> None:
+    """Faz 2 bitti kriteri: eğitim dışı değer `/predict` üzerinden uyarı üretir.
 
-    Frontend şemaya karşı geliştirebilsin diye duruyor; doldurmak Faz 2'nin
-    (guardrails.py) işi. Bu test Faz 2'de bilinçli olarak güncellenecek.
+    Faz 1'de bu test "her zaman boş" diyordu ve bilinçli olarak Faz 2'de
+    güncelleneceği yazılmıştı. Güncellenen hâli sözleşmenin iki ucunu da bağlar:
+    aralık İÇİNDEKİ istek uyarı üretmemeli, DIŞINDAKİ üretmeli.
     """
+    # CLAUDE.md örneği tamamen eğitim aralığının içinde.
     body = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE).json()
     assert body["out_of_distribution_warnings"] == []
 
-    # Eğitim aralığının çok dışında bir değerde bile Faz 1'de boş kalır.
+    # witnesses eğitimde 0-3, age 20-64. İkisi de fiziksel olarak mümkün,
+    # yani Pydantic kabul eder — ama model bunları hiç görmedi.
     body = client.post("/predict", json={"witnesses": 9, "age": 110}).json()
-    assert body["out_of_distribution_warnings"] == []
+    assert set(body["out_of_distribution_warnings"]) == {"witnesses", "age"}
+    # Uyarı tahmini ENGELLEMEZ: skor yine döner.
+    assert 0.0 <= body["fraud_probability"] <= 1.0
+    assert body["risk_level"] in {"low", "medium", "high"}
 
 
 # --------------------------------------------------------------------------- #
