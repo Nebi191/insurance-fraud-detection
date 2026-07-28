@@ -132,14 +132,34 @@ def _positive_class_index(model: Any) -> int:
     """Pozitif sınıfın (`1`) `classes_` içindeki indeksi.
 
     Sabit `1` yazmıyoruz: sınıf sırası estimator'ın gördüğü etiketlere bağlıdır.
-    Etiket bulunamazsa son sınıfa düşeriz (ikili problemde yaygın kabul).
+
+    SESSİZ FALLBACK YOK (Codex C-2). Önceki hâli, etiket bulunamazsa "son sınıf"a
+    düşüyordu. O varsayım ikili problemlerde çoğu zaman doğru ama BU kodda
+    tehlikeliydi: yanlış indeks hem `predict_proba` sütununu hem SHAP eksenini
+    aynı anda kaydırır, dolayısıyla `_verify_shap_additivity` de aynı yanlış
+    ekseni kullanıp EŞİTLİĞİ SAĞLAR. Yani hata, kendi doğrulamasını atlatarak
+    "ters işaretli ama tutarlı" bir servis açardı.
+
+    Artefakt `fraud_reported` alanını 0/1'e map'lediği için `classes_` bu
+    projede her zaman `[0, 1]`'dir; buraya düşmek artefaktın beklenmedik şekilde
+    değiştiği anlamına gelir ve doğru davranış açılmamaktır.
     """
     classes = getattr(model, "classes_", None)
     if classes is None:
-        return 1
+        raise ArtifactError(
+            "Modelde `classes_` yok; pozitif sınıf indeksi belirlenemiyor. "
+            "Artefakt bir sklearn sınıflandırıcısı olmayabilir."
+        )
     classes = np.asarray(classes)
     matches = np.flatnonzero(classes == POSITIVE_CLASS_LABEL)
-    return int(matches[0]) if matches.size else int(classes.size - 1)
+    if not matches.size:
+        raise ArtifactError(
+            f"Modelin sınıf etiketleri arasında pozitif sınıf "
+            f"({POSITIVE_CLASS_LABEL}) yok: classes_={classes.tolist()}. "
+            "Hangi sütunun 'fraud' olduğu tahmin edilemez; bir varsayımla devam "
+            "etmek olasılığı ve SHAP işaretlerini sessizce ters çevirirdi."
+        )
+    return int(matches[0])
 
 
 def _select_positive_class(values: Any, base_values: Any, positive_index: int) -> tuple[np.ndarray, float]:
@@ -362,6 +382,36 @@ class ModelBundle:
         leaked = [n for n in self.display_names if n.startswith(("cat__", "remainder__"))]
         if leaked:
             raise ArtifactError(f"transformed_display_names'te ham önek kalmış: {leaked}")
+
+        # AD EŞLEMESİ POZİSYON BAZINDA DOĞRULANIR (Codex C-3).
+        #
+        # Yukarıdaki iki kontrol yalnızca UZUNLUĞA ve ÖNEKE bakıyordu; ikisi de
+        # adların SIRASI hakkında hiçbir şey söylemez. Metadata'daki liste
+        # permüte edilse (aynı adlar, farklı sıra) uygulama sorunsuz açılıyor,
+        # skorlar doğru kalıyor ama `/predict` her SHAP katkısını YANLIŞ
+        # feature'a atfediyordu — bu demonun tam da satmaya çalıştığı şeyin
+        # sessizce yalan söylemesi demek.
+        #
+        # `_verify_shap_additivity` bunu yakalayamaz: toplam değişmediği için
+        # eşitlik korunur. Testler yakalıyordu (bkz.
+        # `test_shap_feature_names_follow_the_transformed_column_order`) ama
+        # açılış yakalamıyordu; yani bozuk bir artefaktla production'a çıkmak
+        # mümkündü. Doğrusu, adları metadata'ya güvenerek DEĞİL pipeline'ın
+        # kendi çıktısından türetip karşılaştırmak.
+        expected_display = [name.split("__", 1)[-1] for name in transformed]
+        if self.display_names != expected_display:
+            mismatches = [
+                f"pozisyon {position}: metadata={actual!r} pipeline={expected!r}"
+                for position, (actual, expected) in enumerate(
+                    zip(self.display_names, expected_display, strict=True)
+                )
+                if actual != expected
+            ]
+            raise ArtifactError(
+                "transformed_display_names, pipeline'ın kolon sırasıyla eşleşmiyor "
+                f"({len(mismatches)} pozisyon). SHAP katkıları yanlış feature adlarıyla "
+                f"yayınlanırdı. İlk farklar: {mismatches[:5]}"
+            )
 
     def _verify_shap_additivity(self) -> None:
         """Pozitif sınıf seçiminin DOĞRU olduğunu matematiksel olarak kanıtlar.

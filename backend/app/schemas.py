@@ -341,10 +341,24 @@ class PredictResponse(BaseModel):
     shap_values: list[ShapValue] = Field(
         description="34 feature, abs(value) azalan sırada. Kaçının gösterileceğine frontend karar verir."
     )
+    # FAZ 2 İÇİN KRİTİK NOT — GUARDRAIL YALNIZCA SAYISAL OOD ÜRETEBİLİR
+    # (Codex C-4). Kategorik alanlar `Literal` ile eğitimde görülen değerlere
+    # kapalı: bilinmeyen bir kategori guardrail'e HİÇ ULAŞMADAN 422 alır. Yani
+    # "eğitim dışı `policy_state` gönderdim, uyarı bekliyorum" senaryosu
+    # imkânsızdır — 422 döner.
+    #
+    # Bu bilinçli ve doğru: `OrdinalEncoder` `unknown_value=-1` ile kurulu,
+    # bilinmeyen kategoriyi sessizce -1'e kodlayıp anlamsız ama "başarılı"
+    # görünen bir tahmin üretirdi (bkz. bu dosyanın girişindeki 2. madde).
+    # Ama alanın adı ve açıklaması bu sınırı gizlememeli: Faz 4'teki UI
+    # banner'ı "kategorik OOD uyarısı gelir" varsayımıyla yazılırsa sessizce
+    # yanlış olur.
     out_of_distribution_warnings: list[str] = Field(
         description=(
-            "Eğitim dağılımı dışında kalan alan adları. Faz 1'de her zaman boş "
-            "döner; guardrails.py (Faz 2) dolduracak."
+            "Eğitim aralığının dışında kalan SAYISAL alan adları. Kategorik "
+            "alanlar API şemasında kapalı olduğundan burada görünmez — geçersiz "
+            "bir kategori uyarı değil 422 üretir. Faz 1'de her zaman boş döner; "
+            "guardrails.py (Faz 2) dolduracak."
         )
     )
 

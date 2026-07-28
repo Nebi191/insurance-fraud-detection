@@ -38,6 +38,7 @@ from app.main import (
     app,
     create_app,
     get_allowed_origins,
+    model_info,
 )
 from app.model import (
     METADATA_PATH,
@@ -45,7 +46,9 @@ from app.model import (
     PIPELINE_PATH,
     RISK_THRESHOLD_HIGH,
     RISK_THRESHOLD_MEDIUM,
+    ArtifactError,
     ModelBundle,
+    _positive_class_index,
     classify_risk,
 )
 from app.schemas import PREDICT_REQUEST_EXAMPLE, PredictRequest
@@ -412,8 +415,9 @@ def test_shap_additivity_proves_correct_class_axis(client: TestClient) -> None:
     assert reconstructed == pytest.approx(body["fraud_probability"], abs=1e-9)
 
 
-def test_shap_values_match_an_independent_oracle(bundle: ModelBundle) -> None:
-    """SHAP katkıları LightGBM booster'ının kendi `pred_contrib` çıktısıyla aynı.
+def test_shap_values_stay_aligned_with_the_booster_contributions(bundle: ModelBundle) -> None:
+    """SHAP katkıları LightGBM booster'ının `pred_contrib` çıktısıyla POZİSYON
+    bazında hizalı kalmalı.
 
     NEDEN BU TEST VAR (reviewer MINOR-1'in cevabı):
     Eski "yön testi" totolojikti — matematiksel olarak toplanabilirlikten
@@ -422,13 +426,20 @@ def test_shap_values_match_an_independent_oracle(bundle: ModelBundle) -> None:
     aralarında karıştırsanız bile toplam aynı kalır, yani additivity testi
     geçmeye devam eder.
 
-    Bu test bağımsız bir referans kullanıyor: booster'ın `pred_contrib=True`
-    çıktısı (1, n_features+1) şeklinde gelir ve son kolon expected_value'dur.
-    Bizim API çıktımız, `transformed_display_names` üzerinden geri eşlendiğinde
-    bununla BİT BAZINDA aynı olmalı.
+    REFERANSIN SINIRI — BU ORACLE BAĞIMSIZ DEĞİLDİR:
+    `shap.TreeExplainer` bu konfigürasyonda (LightGBM + objective='binary')
+    hesabı kendisi yapmaz; `shap/explainers/_tree.py` içinde
+    `original_model.predict(X, pred_contrib=True)` çağırarak DOĞRUDAN booster'a
+    delege eder. Yani karşılaştırdığımız iki taraf aynı sayısal kaynaktan
+    besleniyor ve bu test SHAP'in matematiğini DOĞRULAMAZ — böyle bir iddiada
+    bulunmamalı.
 
-    Öldürdüğü mutasyonlar: adların kaydırılması/karıştırılması, `zip` off-by-one,
-    yanlış satır seçimi, sıralamanın değerleri adlardan koparması.
+    O hâlde neyi doğruluyor: kendi kodumuzun eşleme katmanını. `values` dizisini
+    `transformed_display_names` ile eşleştiren `zip`, `abs`'e göre sıralama ve
+    pozitif sınıf ekseni seçimi — bunların hepsi katkıları adlardan koparabilir
+    ve sonuç yine "geçerli" görünür. Öldürdüğü mutasyonlar: adların
+    kaydırılması/karıştırılması, `zip` off-by-one, yanlış satır seçimi,
+    sıralamanın değerleri adlardan koparması.
     """
     payload = {
         "incident_severity": "Major Damage",
@@ -1215,3 +1226,318 @@ def test_unknown_category_never_reaches_the_model(bundle: ModelBundle) -> None:
     categorical = [c for c in transformed.columns if c.startswith("cat__")]
     codes = transformed[categorical].to_numpy(dtype=float)
     assert not np.any(codes < 0), "geçerli bir istekte bilinmeyen kategori (-1) oluştu"
+
+
+# --------------------------------------------------------------------------- #
+# 19) Doğrulama turu — hayatta kalan mutasyonların kapatılması
+# --------------------------------------------------------------------------- #
+#
+# Aşağıdaki dört test, önceki turda MUTASYONLA ÖLDÜRÜLEMEYEN iddiaları bağlar.
+# Bir iddianın metinde yazılı olması onu doğru yapmaz; her biri ancak ilgili
+# kodu bozunca kırmızıya dönen bir testle kanıtlanmış sayılır.
+
+
+def test_shap_lock_is_actually_held_during_explanation(
+    bundle: ModelBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explainer çağrılırken `_shap_lock` GERÇEKTEN tutuluyor olmalı.
+
+    NEDEN AYRI BİR TEST GEREKTİ (hayatta kalan mutasyon A-M8):
+    `test_concurrent_predictions_are_bitwise_identical` kilidi kaldıran
+    mutasyonu ÖLDÜREMİYOR ve bu şaşırtıcı değil — shap'in her çağrıda yeniden
+    atadığı `expected_value` hep AYNI değere ayarlanıyor, dolayısıyla yarış
+    durumu çıktıda gözlemlenebilir bir fark üretmiyor. Yani kilit, bugün
+    ölçülebilir bir bug'ı değil, kütüphanenin paylaşılan durumu mutasyona
+    uğratma DAVRANIŞINI kapatıyor; korunan şey gelecekteki bir shap sürümünde
+    o değerin girdiye bağlı hâle gelmesi.
+
+    Sonuç bazlı bir test bunu asla kanıtlayamaz, o yüzden korumanın kendisini
+    doğrudan gözlemliyoruz: açıklama üretilirken kilit tutuluyor mu?
+    `with self._shap_lock:` satırı silinirse burası kırmızıya döner.
+    """
+    original_explainer = bundle.explainer
+    lock_states: list[bool] = []
+
+    class _LockObservingExplainer:
+        """Explainer'ı sarmalar; çağrıldığı ANDA kilidin durumunu kaydeder."""
+
+        def __call__(self, transformed: Any) -> Any:
+            lock_states.append(bundle._shap_lock.locked())
+            return original_explainer(transformed)
+
+    monkeypatch.setattr(bundle, "explainer", _LockObservingExplainer())
+    bundle.predict(PREDICT_REQUEST_EXAMPLE)
+
+    assert lock_states == [True], (
+        "SHAP açıklaması kilit tutulmadan üretildi — paylaşılan explainer "
+        "durumu eş zamanlı isteklere açık."
+    )
+
+
+def test_load_runs_every_startup_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ModelBundle.load()` beş açılış doğrulamasının HEPSİNİ çağırmalı.
+
+    NEDEN AYRI BİR TEST GEREKTİ (hayatta kalan mutasyon):
+    `_verify_transform_equivalence()` ÇAĞRISINI `load()` içinden silen mutasyon
+    tüm suite'i yeşil bırakıyordu. Metodun kendisi test ediliyordu, çağrıldığı
+    ise değil — artefakt zaten tutarlı olduğu için doğrulamayı atlamak hiçbir
+    gözlemlenebilir fark yaratmıyor. Ama koruma tam da tutarsız bir artefakt
+    içindir: sessizce kaldırılırsa fail-fast garantisi kâğıt üstünde kalır.
+    """
+    verifications = (
+        "_verify_contract",
+        "_verify_feature_alignment",
+        "_verify_transform_equivalence",
+        "_verify_shap_additivity",
+        "_warn_on_library_version_drift",
+    )
+    called: list[str] = []
+
+    def spy(name: str) -> Any:
+        original = getattr(ModelBundle, name)
+
+        def wrapper(self: ModelBundle) -> Any:
+            called.append(name)
+            return original(self)
+
+        return wrapper
+
+    for name in verifications:
+        monkeypatch.setattr(ModelBundle, name, spy(name))
+
+    ModelBundle.load()
+
+    assert set(called) == set(verifications), (
+        f"açılışta atlanan doğrulama(lar): {sorted(set(verifications) - set(called))}"
+    )
+    # Sözleşme kontrolü ÖNCE gelmeli: diğer doğrulamalar metadata'nın
+    # beklenen şekilde olduğunu varsayarak çalışıyor.
+    assert called[0] == "_verify_contract"
+
+
+def test_dead_features_change_neither_the_score_nor_their_own_shap_value(
+    bundle: ModelBundle, metadata: dict[str, Any]
+) -> None:
+    """Ölü feature'ın DEĞERİ değişince ne olasılık ne de SHAP katkısı değişir.
+
+    NEDEN AYRI BİR TEST GEREKTİ (fairness metninin aşırı-iddia denetimi):
+    `fairness.field_semantics` şunu iddia ediyor — "split_count=0 olan bir
+    feature bu eğitilmiş modelde hiçbir tahmini etkilemez ve SHAP katkısı HER
+    ZAMAN tam 0.0'dır". Bu metin `/model-info` üzerinden sigorta müşterisine
+    gösterilecek. Mevcut `test_dead_features_have_exactly_zero_shap_value` bunu
+    TEK bir girdi üzerinde ölçüyordu; "her zaman" iddiası tek örnekle
+    kanıtlanmaz.
+
+    Burada her ölü feature'ın eğitimde görülen DEĞER UÇLARINI tek tek deneyip
+    iki şeyi birden kanıtlıyoruz: (1) skor bit bazında sabit kalıyor,
+    (2) o feature'ın kendi SHAP katkısı tam 0.0. `insured_sex` ve
+    `insured_relationship` de bu kümede — yani "cinsiyeti değiştirmek skoru
+    değiştirmiyor" artık bir beyan değil, ölçüm.
+
+    DİKKAT — BU BİR FAIRNESS DENETİMİ DEĞİLDİR. Kanıtlanan tek şey, BU eğitilmiş
+    ağaç kümesinde bu kolonların doğrudan etkisinin sıfır olduğudur. Vekil
+    feature'lar (meslek, hobi, coğrafya) aynı sinyali dolaylı taşıyabilir ve
+    grup bazlı hiçbir metrik hesaplanmadı — `fairness.notes` bunu zaten söylüyor.
+    """
+    influence = metadata["feature_influence"]["features"]
+    ranges = metadata["training_ranges"]
+
+    baseline = bundle.predict({})
+    baseline_probability = baseline["fraud_probability"]
+
+    dead = [name for name, entry in influence.items() if not entry["has_influence"]]
+    assert len(dead) == 16, "ölü feature sayısı değişmiş — metadata ile test ayrışıyor"
+
+    checked = 0
+    for name in dead:
+        spec = ranges[name]
+        if spec["type"] == "categorical":
+            candidates: list[Any] = list(spec["categories"])
+        else:
+            # Sayısal alanlarda eğitim aralığının iki ucu: etkisizlik iddiası
+            # uçlarda da geçerli olmalı.
+            candidates = [spec["min"], spec["max"]]
+
+        for value in candidates:
+            result = bundle.predict({name: value})
+            assert result["fraud_probability"] == baseline_probability, (
+                f"'{name}' ölü ilan edilmiş ama değeri {value!r} yapılınca skor değişti"
+            )
+            contribution = next(
+                item["value"] for item in result["shap_values"] if item["feature"] == name
+            )
+            assert contribution == 0.0, (
+                f"'{name}' ölü ilan edilmiş ama {value!r} girdisinde SHAP katkısı "
+                f"{contribution!r}"
+            )
+            checked += 1
+
+    # Testin gerçekten iş yaptığının kanıtı: 16 feature için çok sayıda değer.
+    assert checked > 40, f"beklenenden az kombinasyon denendi: {checked}"
+
+    # Ters yön — canlı bir feature'ı değiştirmek skoru DEĞİŞTİRMELİ, yoksa
+    # yukarıdaki eşitlikler modelin hiçbir şeye tepki vermemesinden ibaret olurdu.
+    moved = bundle.predict({"insured_hobbies": "chess"})["fraud_probability"]
+    assert moved != baseline_probability
+
+
+def test_model_info_projection_drops_unknown_nested_keys(bundle: ModelBundle) -> None:
+    """Beyaz liste İÇ İÇE anahtarlarda da sızdırmıyor.
+
+    NEDEN AYRI BİR TEST GEREKTİ (feature_influence sızıntı testi):
+    Mevcut sızıntı testleri BUGÜN metadata'da var olan üç anahtarı
+    (`preprocessing_contract`, `model_params`, `source_file`) arıyor. Ama beyaz
+    listenin asıl vaadi geleceğe dönük: "yarın train_pipeline.py metadata'ya
+    yeni bir alan eklerse o alan açıkça beyaz listeye alınana kadar dışarı
+    çıkmaz". Bu vaat, bugün var olan anahtarları arayarak test edilemez.
+
+    Bu yüzden metadata'ya SAHTE alanlar enjekte edip projeksiyonu çalıştırıyoruz.
+    Bir alt modelin `extra="ignore"` ayarı `extra="allow"` yapılırsa ya da
+    `ModelInfoResponse` metadata'yı olduğu gibi yansıtmaya başlarsa burası
+    kırmızıya döner.
+    """
+    probe_metadata = copy.deepcopy(bundle.metadata)
+
+    # Beyaz listede OLMAYAN alanlar, üç ayrı iç içe seviyeye serpiştiriliyor.
+    probe_metadata["_internal_note"] = "SIZINTI-KOK"
+    probe_metadata["feature_influence"]["_debug_dump"] = "SIZINTI-INFLUENCE"
+    probe_metadata["feature_influence"]["features"]["age"]["_raw_tree_paths"] = "SIZINTI-ENTRY"
+    probe_metadata["feature_influence"]["summary"]["_internal_rank"] = "SIZINTI-SUMMARY"
+    probe_metadata["fairness"]["_reviewer_private_note"] = "SIZINTI-FAIRNESS"
+    probe_metadata["fairness"]["protected_attributes_used_as_features"][0]["_ticket"] = (
+        "SIZINTI-ATTRIBUTE"
+    )
+    probe_metadata["dataset"]["source_file"] = "C:/sunucu/gizli/yol/insurance_claims.csv"
+    probe_metadata["metrics"]["_internal_holdout_auc"] = "SIZINTI-METRIC"
+
+    probe = ModelBundle(bundle.pipeline, probe_metadata)
+    rendered = json.dumps(
+        model_info(probe).model_dump(by_alias=True), ensure_ascii=False, default=str
+    )
+
+    assert "SIZINTI" not in rendered, "beyaz liste iç içe bir anahtarı sızdırdı"
+    assert "gizli" not in rendered, "sunucu tarafı dosya yolu sızdı"
+    assert "source_file" not in rendered
+
+    # Enjeksiyon gerçekten yanıtın DOKUNDUĞU yerlere yapılmış olmalı — aksi
+    # hâlde test hiçbir şey kanıtlamadan yeşil kalırdı.
+    assert "insured_sex" in rendered
+    assert "_raw_tree_paths" in json.dumps(probe_metadata["feature_influence"]["features"]["age"])
+
+
+def test_model_info_projection_covers_training_ranges_and_defaults(
+    bundle: ModelBundle,
+) -> None:
+    """`training_ranges` ve `defaults` dallarına da canary enjekte edilir.
+
+    Codex C-6: bir üstteki test dört metadata dalını kapsıyordu ama bu ikisini
+    atlıyordu. `TrainingRangeInfo` / `DefaultInfo` bugün `extra="ignore"` — yani
+    kod güvenli. Ancak kapsanmayan bir dal, "beyaz liste her yerde çalışıyor"
+    iddiasını test edilmemiş bırakır: biri `extra="allow"`a dönerse ve metadata
+    ileride oraya hassas bir alan koyarsa testler yeşilken sızıntı olur.
+    """
+    probe_metadata = copy.deepcopy(bundle.metadata)
+
+    a_range = next(iter(probe_metadata["training_ranges"]))
+    a_default = next(iter(probe_metadata["defaults"]))
+    probe_metadata["training_ranges"][a_range]["_raw_column_sample"] = "SIZINTI-RANGE"
+    probe_metadata["defaults"][a_default]["_source_row_id"] = "SIZINTI-DEFAULT"
+
+    probe = ModelBundle(bundle.pipeline, probe_metadata)
+    rendered = json.dumps(
+        model_info(probe).model_dump(by_alias=True), ensure_ascii=False, default=str
+    )
+
+    assert "SIZINTI" not in rendered
+    # Dallar yanıtta gerçekten var — enjeksiyon boşluğa yapılmadı.
+    assert a_range in json.loads(rendered)["training_ranges"]
+    assert a_default in json.loads(rendered)["defaults"]
+
+
+# --------------------------------------------------------------------------- #
+# 20) Codex ikinci görüşünün açtığı fail-fast boşlukları
+# --------------------------------------------------------------------------- #
+
+
+def test_body_limit_applies_to_endpoints_that_never_read_the_body(
+    client: TestClient,
+) -> None:
+    """Gövdesini okumayan endpoint'lerde de gövde sınırı uygulanmalı (Codex C-1).
+
+    BULUNAN AÇIK: sınırın akış bazlı kolu, uygulamanın `receive()` çağırmasına
+    bağlıydı. `/health` ve `/model-info` istek gövdesini hiç okumaz, dolayısıyla
+    `Content-Length` göndermeyen (chunked) bir istemci bu endpoint'lere sınırsız
+    gövde akıtabiliyordu. Ölçüldü: 160 KB chunked gövde ile `GET /health` -> 200.
+
+    `Content-Length` VARSA ucuz yol zaten yakalıyordu; açık yalnızca chunked
+    yolundaydı — yani tam olarak başlığı hiç göndermeyen istemcide.
+    """
+
+    def chunks() -> Any:
+        for _ in range(20):
+            yield b"x" * 8192  # toplam 160 KB, Content-Length YOK
+
+    for path in ("/health", "/model-info"):
+        response = client.request("GET", path, content=chunks())
+        assert response.status_code == 413, (
+            f"{path} 160 KB chunked gövdeyi kabul etti ({response.status_code}) — "
+            "gövde sınırı bu endpoint'te uygulanmıyor"
+        )
+
+    # Normal istekler etkilenmemeli: gövdesiz GET hâlâ çalışıyor.
+    assert client.get("/health").status_code == 200
+    assert client.get("/model-info").status_code == 200
+
+
+def test_display_names_out_of_order_fails_fast(bundle: ModelBundle) -> None:
+    """`transformed_display_names` PERMÜTE edilirse uygulama açılmamalı (Codex C-3).
+
+    BULUNAN AÇIK: `_verify_feature_alignment` yalnızca uzunluğa ve `cat__` /
+    `remainder__` önekine bakıyordu; ikisi de adların SIRASI hakkında hiçbir şey
+    söylemez. Aynı adları farklı sırada içeren bir metadata ile servis sorunsuz
+    açılıyor, skorlar doğru kalıyor, ama `/predict` her SHAP katkısını YANLIŞ
+    feature'a atfediyordu.
+
+    `_verify_shap_additivity` bunu yakalayamaz — toplam değişmediği için eşitlik
+    korunur. Testler yakalıyordu, açılış yakalamıyordu; yani bozuk bir artefaktla
+    production'a çıkmak mümkündü. Bu, demonun tam da satmaya çalıştığı şeyin
+    (açıklanabilirlik) sessizce yalan söylemesi olurdu.
+    """
+    broken = copy.deepcopy(bundle.metadata)
+    names = broken["feature_list"]["transformed_display_names"]
+    names[0], names[1] = names[1], names[0]  # sadece SIRA bozuluyor
+
+    probe = ModelBundle(bundle.pipeline, broken)
+    with pytest.raises(ArtifactError, match="kolon sırasıyla eşleşmiyor"):
+        probe._verify_feature_alignment()
+
+    # Sağlamlık: bozulmamış metadata aynı kontrolden geçmeli.
+    ModelBundle(bundle.pipeline, copy.deepcopy(bundle.metadata))._verify_feature_alignment()
+
+
+def test_missing_positive_class_fails_fast_instead_of_guessing(
+    bundle: ModelBundle,
+) -> None:
+    """`classes_` içinde pozitif etiket yoksa tahmin edilmemeli (Codex C-2).
+
+    BULUNAN AÇIK: eski kod etiketi bulamayınca "son sınıf"a düşüyordu. Bu
+    varsayım yanlış olduğunda hem `predict_proba` sütunu hem SHAP ekseni AYNI
+    ANDA kayar — dolayısıyla `_verify_shap_additivity` de aynı yanlış ekseni
+    kullanır ve eşitliği sağlar. Yani hata kendi doğrulamasını atlatıp "ters
+    işaretli ama tutarlı" bir servis açardı.
+    """
+
+    class _WrongLabels:
+        classes_ = np.array([0, 2])
+
+    class _NoLabels:
+        pass
+
+    with pytest.raises(ArtifactError, match="pozitif sınıf"):
+        _positive_class_index(_WrongLabels())
+
+    with pytest.raises(ArtifactError, match="classes_"):
+        _positive_class_index(_NoLabels())
+
+    # Gerçek artefakt etkilenmemeli: pozitif sınıf 1, indeksi de doğru bulunuyor.
+    assert _positive_class_index(bundle.pipeline.named_steps["model"]) == 1

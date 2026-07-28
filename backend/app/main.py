@@ -145,6 +145,18 @@ def get_allowed_origins() -> list[str]:
 # olmayan public bir endpoint için bu ucuz bir DoS yüzeyidir.
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 
+# Gövde BEKLEMEYEN metodlar (Codex C-1).
+#
+# Sınırın akış bazlı kolu, downstream uygulamanın gövdeyi OKUMASINA bağlıydı:
+# sayaç yalnızca `receive()` çağrıldığında ilerliyor. `/health` ve `/model-info`
+# istek gövdesini hiç okumaz, dolayısıyla `Content-Length` göndermeyen (chunked)
+# bir istemci bu endpoint'lere sınırsız gövde akıtıp 200 alabiliyordu —
+# ölçüldü: 160 KB chunked gövde ile `GET /health` -> 200.
+#
+# Bu metodlarda gövdeyi middleware'in KENDİSİ tüketip sayıyoruz. Maliyet
+# pratikte sıfır: normal bir GET'in gövdesi zaten boştur, döngü ilk mesajda biter.
+BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
+
 
 class _BodyTooLarge(Exception):
     """Gövde sınırı aşıldı (yalnızca middleware içinde kullanılır)."""
@@ -189,6 +201,10 @@ class BodySizeLimitMiddleware:
                 # Bozuk Content-Length: başlığa güvenmeyip akışı sayarak ilerle.
                 pass
 
+        if scope.get("method", "").upper() in BODYLESS_METHODS:
+            await self._call_with_drained_body(scope, receive, send)
+            return
+
         received = 0
         exceeded = False
         handled = False
@@ -232,6 +248,42 @@ class BodySizeLimitMiddleware:
             if not handled:
                 handled = True
                 await self._reject(send)
+
+    async def _call_with_drained_body(
+        self,
+        scope: MutableMapping[str, Any],
+        receive: Callable[[], Awaitable[MutableMapping[str, Any]]],
+        send: Callable[[MutableMapping[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Gövdesiz metodlarda gövdeyi middleware tüketip sayar, sonra uygulamayı çağırır.
+
+        NEDEN AYRI YOL: normal akışta sayaç `counting_receive` üzerinden çalışır
+        ve yalnızca uygulama gövdeyi okursa ilerler. GET endpoint'leri gövdeyi
+        okumadığı için o kol hiç devreye girmiyordu (bkz. `BODYLESS_METHODS`).
+        Burada okuma sorumluluğunu uygulamadan alıyoruz: sınır, endpoint'in
+        gövdeyle ilgilenip ilgilenmemesinden BAĞIMSIZ hâle geliyor.
+
+        Sınır aşılırsa okuma o anda durur — korumaya çalıştığımız belleği önce
+        harcamayız.
+        """
+        received = 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                # http.disconnect: istemci gitti, sayacak gövde kalmadı.
+                break
+            received += len(message.get("body", b""))
+            if received > self.max_body_bytes:
+                await self._reject(send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        async def drained_receive() -> MutableMapping[str, Any]:
+            """Gövde tüketildi; uygulama yine de okumak isterse boş görür."""
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, drained_receive, send)
 
     async def _reject(
         self, send: Callable[[MutableMapping[str, Any]], Awaitable[None]]
