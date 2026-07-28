@@ -4,6 +4,9 @@ dist-ssr
 *.local
 .vite
 
+# TypeScript artımlı derleme önbelleği — makineye özgü, repoya girmez.
+*.tsbuildinfo
+
 # Netlify (Faz 7)
 .netlify
 
