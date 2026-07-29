@@ -6,7 +6,12 @@
 # to sort `from app.model import ...` alphabetically among the `fastapi` imports.
 # That was not a style preference but ruff not knowing the project layout: `src`
 # tells it the truth by pointing at the package root. No rule is silenced — the
-# rule set is ruff's default (E4/E7/E9/F).
+# rule set is whatever the pinned ruff ships as its default.
+#
+# NOTE: that default is NOT stable across releases. It used to be E4/E7/E9/F;
+# ruff 0.16 also turns on B/S/SIM/UP/TRY/RUF. This is exactly why the version is
+# pinned in requirements.txt — otherwise an upgrade silently changes what "lint
+# passes" means.
 #
 # `src` is relative to the directory containing this file: `app/` lives under
 # backend/, so `app` is recognised as first-party.

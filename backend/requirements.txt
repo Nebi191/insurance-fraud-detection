@@ -69,6 +69,13 @@ httpx==0.28.1             # fastapi.testclient
 httpcore==1.0.9           # httpx
 certifi==2026.6.17        # httpx
 
+# --- Lint (development/CI only) ---
+# Pinned because ruff's DEFAULT rule set widens between releases: 0.16 enables
+# B/S/SIM/UP/TRY/RUF rules that earlier versions did not. An unpinned ruff would
+# make CI go red on a day nobody touched the code. See ruff.toml for the layout
+# configuration.
+ruff==0.16.0
+
 # NOTE: starlette 1.3.1 emits a StarletteDeprecation warning when used with httpx
 # ("install httpx2 instead"). The tests run fine; migrating to httpx2 was
 # DELIBERATELY DEFERRED — it is not Phase 1's subject, and changing a pinned
