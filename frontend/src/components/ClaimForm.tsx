@@ -12,6 +12,14 @@
  * `buildPayload` only packs fields that were filled in. The backend fills the
  * rest with the training median/mode, and the guardrail only checks fields that
  * were actually SENT — that is why an empty form does not produce 34 warnings.
+ *
+ * A NON-FINITE NUMBER IS REJECTED, NOT DROPPED
+ * `type="number"` still lets someone type something like `1e999`, and
+ * `Number("1e999") === Infinity`. Silently omitting that field would send the
+ * request as if the field had never been touched — the user would get a score
+ * that quietly ignored their input with no indication anything was wrong.
+ * `buildPayload` reports these as field errors instead, and the caller must
+ * check for them BEFORE sending anything (see `ScorePage.handleSubmit`).
  */
 
 import { useState } from "react";
@@ -22,23 +30,39 @@ import { FieldControl } from "./FieldControl";
 
 export type FormValues = Record<string, string>;
 
-export function buildPayload(values: FormValues, info: ModelInfoResponse): PredictRequest {
+export interface BuildPayloadResult {
+  payload: PredictRequest;
+  /** Field name -> message, for values that must NOT be sent to the backend. */
+  fieldErrors: Record<string, string>;
+}
+
+// `buildPayload` shares its types and validation rules tightly with
+// `ClaimForm`/`FieldGroupSection` below; splitting it into its own module
+// would only add indirection. This only affects Vite Fast Refresh
+// granularity, not correctness.
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildPayload(values: FormValues, info: ModelInfoResponse): BuildPayloadResult {
   const payload: PredictRequest = {};
+  const fieldErrors: Record<string, string> = {};
+
   for (const [name, raw] of Object.entries(values)) {
     const value = raw.trim();
     if (value === "") continue; // blank = don't send, let the default apply
 
     if (info.training_ranges[name]?.type === "numeric") {
       const parsed = Number(value);
-      // We never send NaN: the backend would return a 422 and the user would
-      // learn about the mistake from an opaque server message. The number input
-      // already rejects letters; this is a second safety net.
-      if (Number.isFinite(parsed)) payload[name] = parsed;
+      if (Number.isFinite(parsed)) {
+        payload[name] = parsed;
+      } else {
+        // Covers NaN (unreachable in practice, the number input already rejects
+        // letters) and +/-Infinity (reachable: "1e999" parses to Infinity).
+        fieldErrors[name] = "Enter a finite number.";
+      }
     } else {
       payload[name] = value;
     }
   }
-  return payload;
+  return { payload, fieldErrors };
 }
 
 interface ClaimFormProps {
@@ -50,6 +74,8 @@ interface ClaimFormProps {
   fieldErrors: Record<string, string>;
   oodFields: Set<string>;
   submitting: boolean;
+  /** Bumped by the caller on every submit attempt; see `FieldGroupSection`. */
+  attempt: number;
 }
 
 export function ClaimForm({
@@ -61,6 +87,7 @@ export function ClaimForm({
   fieldErrors,
   oodFields,
   submitting,
+  attempt,
 }: ClaimFormProps) {
   const filledCount = Object.values(values).filter((value) => value.trim() !== "").length;
 
@@ -97,6 +124,7 @@ export function ClaimForm({
           fieldErrors={fieldErrors}
           oodFields={oodFields}
           defaultOpen={group.id === HIGHLIGHT_GROUP.id}
+          attempt={attempt}
         />
       ))}
 
@@ -133,6 +161,7 @@ function FieldGroupSection({
   fieldErrors,
   oodFields,
   defaultOpen,
+  attempt,
 }: {
   group: FieldGroup;
   info: ModelInfoResponse;
@@ -141,6 +170,7 @@ function FieldGroupSection({
   fieldErrors: Record<string, string>;
   oodFields: Set<string>;
   defaultOpen: boolean;
+  attempt: number;
 }) {
   const [open, setOpen] = useState(defaultOpen);
 
@@ -150,6 +180,24 @@ function FieldGroupSection({
   const errorCount = group.fields.filter((field) => fieldErrors[field.name]).length;
   const oodCount = group.fields.filter((field) => oodFields.has(field.name)).length;
   const sectionId = `group-${group.id}`;
+
+  // A closed group with an error inside it only shows a badge on its header —
+  // the user would have to know to open it manually. Auto-open on a NEW submit
+  // attempt if this group has an error, but only then: `errorCount` alone
+  // changing (e.g. another group's errors were touched, or the user fixed and
+  // re-broke a field without resubmitting) must not re-open a group the user
+  // deliberately closed after already seeing the same error.
+  //
+  // This adjusts state WHILE RENDERING (comparing against the last-seen
+  // `attempt` stored in state) rather than in a `useEffect` — the officially
+  // recommended pattern for "reset/adjust state when a prop changes"
+  // (see https://react.dev/learn/you-might-not-need-an-effect). It avoids an
+  // extra commit-then-effect round trip and does not need a lint override.
+  const [lastAttempt, setLastAttempt] = useState(attempt);
+  if (attempt !== lastAttempt) {
+    setLastAttempt(attempt);
+    if (errorCount > 0) setOpen(true);
+  }
 
   return (
     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
@@ -206,6 +254,7 @@ function FieldGroupSection({
                   key={field.name}
                   meta={field}
                   range={range}
+                  physicalRange={info.physical_ranges[field.name]}
                   fallback={fallback}
                   splitCount={influence.split_count}
                   hasInfluence={influence.has_influence}

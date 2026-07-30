@@ -25,9 +25,11 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, get_args
 
+import annotated_types
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from pydantic.fields import FieldInfo
 
 from app import model as model_module
 from app.main import (
@@ -197,6 +199,79 @@ def test_model_info_pii_appears_only_as_dropped_column_declaration(client: TestC
         assert column not in body["defaults"]
         assert column not in body["training_ranges"]
         assert column not in body["feature_list"]["pipeline_input_order"]
+
+
+def _bounds_via_model_fields(field_name: str) -> tuple[float, float] | None:
+    """Independently derives one field's (ge, le) bound straight from
+    `PredictRequest.model_fields`, walking `annotated_types.Ge`/`Le` metadata —
+    NOT via `model_json_schema()`, which is what `app.schemas.
+    physical_ranges_from_predict_request` itself reads.
+
+    This is deliberately a SECOND, DIFFERENT introspection path. The production
+    code and this test therefore cannot agree by construction (e.g. both reading
+    the same cached schema dict); they only agree if `/model-info`'s
+    `physical_ranges` genuinely reflects the field's real `Field(ge=..., le=...)`
+    declaration. Returns `None` for a field with no numeric bound (categorical
+    `Literal` fields).
+    """
+    field = PredictRequest.model_fields[field_name]
+    for arg in get_args(field.annotation) or (field.annotation,):
+        if arg is type(None):
+            continue
+        inner_args = get_args(arg)
+        if not inner_args:
+            continue
+        for meta in inner_args[1:]:
+            metadata = meta.metadata if isinstance(meta, FieldInfo) else [meta]
+            ge = next((m.ge for m in metadata if isinstance(m, annotated_types.Ge)), None)
+            le = next((m.le for m in metadata if isinstance(m, annotated_types.Le)), None)
+            if ge is not None and le is not None:
+                return float(ge), float(le)
+    return None
+
+
+def test_model_info_physical_ranges_match_pydantic_bounds_by_introspection(
+    client: TestClient,
+) -> None:
+    """`physical_ranges` must be EXACTLY `PredictRequest`'s own Pydantic bounds.
+
+    This is the single-source-of-truth guarantee: the values are compared
+    against bounds DERIVED FROM THE MODEL (via a second, independent
+    introspection path — `_bounds_via_model_fields` above), never against a
+    hand-written expected dict. If a `Field(ge=..., le=...)` bound in
+    `schemas.py` ever changes, this test changes its expectation with it
+    automatically; a hand-copied dict could not do that.
+    """
+    body = client.get("/model-info").json()
+    physical_ranges = body["physical_ranges"]
+
+    expected: dict[str, tuple[float, float]] = {}
+    for name, field in PredictRequest.model_fields.items():
+        bounds = _bounds_via_model_fields(name)
+        if bounds is None:
+            continue  # categorical field — no physical bound to publish.
+        key = field.alias if field.alias else name
+        expected[key] = bounds
+
+    assert set(physical_ranges) == set(expected), (
+        "the set of fields published in physical_ranges disagrees with the "
+        "numeric fields actually declared in PredictRequest"
+    )
+    for key, (low, high) in expected.items():
+        assert physical_ranges[key] == {"min": low, "max": high}, (
+            f"'{key}': /model-info published {physical_ranges[key]}, "
+            f"but PredictRequest declares (min={low}, max={high})"
+        )
+
+    # The two hyphenated aliases must come through under the EXACT same spelling
+    # `training_ranges` already uses (see `schemas.py`'s
+    # `physical_ranges_from_predict_request` docstring) — a client must be able
+    # to look a field up in both dicts with one key, no translation table.
+    assert "capital-gains" in physical_ranges
+    assert "capital-loss" in physical_ranges
+    assert "capital_gains" not in physical_ranges
+    assert "capital_loss" not in physical_ranges
+    assert set(physical_ranges["capital-gains"]) == {"min", "max"}
 
 
 # --------------------------------------------------------------------------- #

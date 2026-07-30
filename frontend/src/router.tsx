@@ -19,6 +19,11 @@
  * a 404. That would have been required with react-router too.
  */
 
+/* eslint-disable react-refresh/only-export-components -- `useRoute` and
+   `RouteLink` share the `Route` type and routing logic; splitting them into
+   separate files only adds indirection. This only affects Vite Fast Refresh
+   granularity, not correctness. */
+
 import { useCallback, useEffect, useState } from "react";
 
 export type Route = "score" | "model-card";

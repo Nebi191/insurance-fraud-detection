@@ -52,6 +52,18 @@ export interface TrainingRange {
   categories?: string[] | null;
 }
 
+/**
+ * The API's hard (Pydantic `ge`/`le`) bound for one NUMERIC field — distinct
+ * from `TrainingRange`, which is the min/max actually observed in the
+ * training data. A value inside `PhysicalRange` but outside `TrainingRange`
+ * is accepted (200) with an out-of-distribution warning; a value outside
+ * `PhysicalRange` is rejected (422) before it ever reaches the model.
+ */
+export interface PhysicalRange {
+  min: number;
+  max: number;
+}
+
 export interface DefaultInfo {
   value: number | string;
   dtype: string;
@@ -131,6 +143,8 @@ export interface ModelInfoResponse {
   };
   feature_influence: FeatureInfluence;
   training_ranges: Record<string, TrainingRange>;
+  /** Numeric fields only — a categorical field has no entry here. */
+  physical_ranges: Record<string, PhysicalRange>;
   defaults: Record<string, DefaultInfo>;
   fairness: FairnessInfo;
   library_versions: Record<string, string>;

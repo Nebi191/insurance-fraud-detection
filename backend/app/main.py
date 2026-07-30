@@ -77,6 +77,7 @@ from app.schemas import (
     PredictRequest,
     PredictResponse,
     RiskThresholdsInfo,
+    physical_ranges_from_predict_request,
 )
 
 # --------------------------------------------------------------------------- #
@@ -436,6 +437,10 @@ def model_info(bundle: BundleDep) -> ModelInfoResponse:
         feature_list=metadata["feature_list"],
         feature_influence=metadata["feature_influence"],
         training_ranges=metadata["training_ranges"],
+        # NOT from `metadata`: this is the OTHER layer (see `schemas.py` point 1),
+        # derived by introspection from `PredictRequest`'s own JSON Schema so it
+        # can never drift from what `/openapi.json` actually accepts.
+        physical_ranges=physical_ranges_from_predict_request(),
         defaults=metadata["defaults"],
         fairness=metadata["fairness"],
         library_versions=metadata["library_versions"],

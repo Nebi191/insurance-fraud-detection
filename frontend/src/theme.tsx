@@ -6,6 +6,11 @@
  * state into React and writes changes to both the DOM and localStorage.
  */
 
+/* eslint-disable react-refresh/only-export-components -- `useTheme` and
+   `ThemeToggle` share the `Theme` type and toggle logic; splitting them into
+   separate files only adds indirection. This only affects Vite Fast Refresh
+   granularity, not correctness. */
+
 import { useCallback, useEffect, useState } from "react";
 
 export type Theme = "light" | "dark";

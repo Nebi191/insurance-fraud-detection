@@ -50,6 +50,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // This triggers an async loader; `load` calls `setState` inside its own
+    // body (in a later microtask), not synchronously here. Standard "fetch on
+    // mount" pattern, not the cascading-render case the rule targets.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
@@ -81,7 +85,12 @@ export default function App() {
 
       <main className="mx-auto max-w-7xl px-4 py-6">
         {state.status === "loading" && <LoadingState />}
-        {state.status === "error" && <ErrorState message={state.message} onRetry={load} />}
+        {state.status === "error" && (
+          // `load` swallows every error internally (try/catch) and never
+          // rejects, so passing it here cannot produce an unhandled rejection.
+          // eslint-disable-next-line @typescript-eslint/no-misused-promises
+          <ErrorState message={state.message} onRetry={load} />
+        )}
         {state.status === "ready" &&
           (route === "model-card" ? (
             <ModelCardPage info={state.info} />

@@ -537,3 +537,50 @@ def test_fields_blind_in_both_directions_can_never_warn(client: TestClient) -> N
         assert client.post(
             "/predict", json={"incident_hour_of_the_day": invalid}
         ).status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# 9) `/model-info -> physical_ranges` — the missing half of the picture
+# --------------------------------------------------------------------------- #
+#
+# The frontend's field help text used to show only `training_ranges` ("seen in
+# training: 0-3"), so a user who typed -1 into `witnesses` expecting an OOD
+# warning got a 422 instead and had no way to know why: the physical floor (0)
+# was never published anywhere. `physical_ranges` closes that gap. These tests
+# prove the two numbers PUBLISHED BY THE API actually behave the way their names
+# claim, end to end, rather than merely asserting the field exists.
+
+
+def test_physical_range_and_training_range_stay_distinct_end_to_end(client: TestClient) -> None:
+    """`witnesses`: physical ceiling and training ceiling are different numbers on
+    purpose (see the "TWO LAYERS OF VALIDATION" note at the top of `schemas.py`).
+
+    Uses the ACTUAL numbers `/model-info` publishes — not the values hard-coded
+    elsewhere in this file — so the test also proves `physical_ranges` is telling
+    the truth about what `/predict` will accept.
+    """
+    info = client.get("/model-info").json()
+    physical = info["physical_ranges"]["witnesses"]
+    training = info["training_ranges"]["witnesses"]
+
+    # If these ever became equal the guardrail could never fire upward either
+    # (the exact "one-way blindness" failure mode documented above).
+    assert physical["max"] > training["max"]
+
+    # One step past the PHYSICAL ceiling: Pydantic rejects it before the
+    # guardrail ever runs.
+    beyond_physical = client.post("/predict", json={"witnesses": physical["max"] + 1})
+    assert beyond_physical.status_code == 422
+
+    # At the physical ceiling itself: physically possible, so Pydantic accepts
+    # it, but it is well past the TRAINING ceiling, so the guardrail must speak
+    # up. This is the exact confusion from the bug report resolved: a value the
+    # UI now knows is physically valid still earns a warning, not a silent 422.
+    at_physical_ceiling = client.post("/predict", json={"witnesses": physical["max"]})
+    assert at_physical_ceiling.status_code == 200
+    assert at_physical_ceiling.json()["out_of_distribution_warnings"] == ["witnesses"]
+
+    # And a value inside BOTH ranges warns about neither.
+    inside_both = client.post("/predict", json={"witnesses": training["max"]})
+    assert inside_both.status_code == 200
+    assert inside_both.json()["out_of_distribution_warnings"] == []

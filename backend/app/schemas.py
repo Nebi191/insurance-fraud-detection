@@ -152,7 +152,11 @@ class PredictRequest(BaseModel):
         `total_claim_amount: 55000`. The ban is kept focused on `bool` alone.
         """
         if isinstance(value, bool):
-            raise ValueError(
+            # Deliberately `ValueError`, not `TypeError` (ruff's TRY004 suggestion,
+            # silenced below): Pydantic's `field_validator` only converts
+            # `ValueError`/`AssertionError` into a 422 response; a `TypeError` raised
+            # here would propagate unhandled as a 500 instead.
+            raise ValueError(  # noqa: TRY004
                 "boolean values are not accepted; this field expects a number or a category"
             )
         return value
@@ -527,6 +531,72 @@ class TrainingRangeInfo(BaseModel):
     categories: list[str] | None = None
 
 
+class PhysicalRangeInfo(BaseModel):
+    """The Pydantic "is this value physically/logically possible?" bound (point 1
+    at the top of this file), published SYMMETRICALLY to `TrainingRangeInfo`.
+
+    Deliberately NUMERIC-ONLY — categorical fields are closed with `Literal` and
+    have no min/max to publish; the guardrail-vs-Pydantic distinction they need is
+    already covered by `PredictResponse.out_of_distribution_warnings` always
+    returning a 422 for them instead of a warning (see the note there).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    min: int | float
+    max: int | float
+
+
+def physical_ranges_from_predict_request() -> dict[str, PhysicalRangeInfo]:
+    """Derives `PredictRequest`'s own physical bounds straight from its JSON Schema
+    — NEVER from a hand-written dictionary (the same rule the dead-feature list
+    and `training_ranges` already follow: a value that lives in two places will
+    eventually only be true in one of them).
+
+    THE MECHANISM: `PredictRequest.model_json_schema()` is the exact same document
+    a frontend developer sees under `/openapi.json`. It is also ALREADY the
+    mechanism `tests/test_api.py::test_numeric_bounds_are_supersets_of_training_ranges`
+    and `tests/test_guardrails.py::_pydantic_bounds` use to verify these same
+    bounds — reusing it here means this function and those two tests can never
+    quietly drift apart, because all three read the identical rendering of the
+    identical `Annotated[int, Field(ge=..., le=...)] | None` declarations.
+
+    An alternative was considered: walking `PredictRequest.model_fields` and
+    picking `annotated_types.Ge`/`Le` out of the nested `FieldInfo` metadata by
+    hand. It works, but it reaches past Pydantic's own schema renderer to
+    reimplement a piece of it (the `Optional` unwrapping, `Gt`/`Lt` vs `Ge`/`Le`
+    conflation, alias resolution) — one more private code path that could drift
+    from what `/openapi.json` actually publishes. `model_json_schema()` is the
+    published contract itself, so this function cannot diverge from it.
+
+    FIELD NAMING: the JSON Schema property key is the field's ALIAS when one is
+    declared (`capital_gains` -> `"capital-gains"`), because that is what Pydantic
+    itself emits as the schema key. `metadata.training_ranges` already uses that
+    same hyphenated spelling, so the two dictionaries key-match one-to-one with
+    no translation table.
+
+    Categorical (`Literal`) fields have no `minimum`/`maximum` in their schema
+    branch and are skipped — this dict is numeric fields only, by design.
+    """
+    properties: dict[str, dict[str, Any]] = PredictRequest.model_json_schema()["properties"]
+    ranges: dict[str, PhysicalRangeInfo] = {}
+    for name, field_schema in properties.items():
+        # `int | None` / `float | None` fields render as `anyOf: [<bound schema>,
+        # {"type": "null"}]`; a field with no `| None` (none exist today, but the
+        # fallback keeps this correct if one is ever added) renders as the bound
+        # schema directly.
+        branches = [
+            branch for branch in field_schema.get("anyOf", [field_schema]) if branch.get("type") != "null"
+        ]
+        if len(branches) != 1:
+            continue
+        branch = branches[0]
+        if "minimum" not in branch or "maximum" not in branch:
+            continue  # categorical (Literal) field — no physical bound to publish.
+        ranges[name] = PhysicalRangeInfo(min=branch["minimum"], max=branch["maximum"])
+    return ranges
+
+
 class DefaultInfo(BaseModel):
     """The median/mode value used for fields that were not supplied.
 
@@ -670,6 +740,12 @@ class ModelInfoResponse(BaseModel):
     feature_list: FeatureListInfo
     feature_influence: FeatureInfluenceInfo
     training_ranges: dict[str, TrainingRangeInfo]
+    # NOT read from `metadata` (see `model_info()` in `main.py`): this is derived
+    # by introspection from `PredictRequest` itself, the API-contract layer, not
+    # the model artifact. Keyed identically to `training_ranges` (alias names such
+    # as "capital-gains"), so a client can look a field up in both dicts with the
+    # same key and compare "what Pydantic accepts" against "what training saw".
+    physical_ranges: dict[str, PhysicalRangeInfo]
     defaults: dict[str, DefaultInfo]
     fairness: FairnessInfo
     library_versions: dict[str, str]

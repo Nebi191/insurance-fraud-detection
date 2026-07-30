@@ -86,7 +86,10 @@ function toFieldErrors(body: unknown): Record<string, string> {
     if (!Array.isArray(location) || typeof message !== "string") continue;
 
     // loc = ["body", "<field>"] — the first element points at the body, so we
-    // take the last one.
+    // take the last one. `location` was already narrowed to `unknown[]` by
+    // `Array.isArray` above; the value read out is verified at runtime right
+    // below with `typeof field === "string"`.
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const field = location[location.length - 1];
     if (typeof field === "string" && field !== "body" && !(field in errors)) {
       errors[field] = message;
@@ -102,7 +105,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       headers: { "Content-Type": "application/json", ...init?.headers },
     });
-  } catch (cause) {
+  } catch {
     // A CORS rejection also lands here, and the browser deliberately withholds
     // the reason from JS — which is why the message spells out the likely cause.
     throw new ApiError(
@@ -166,6 +169,7 @@ export async function fetchModelInfo(): Promise<ModelInfoResponse> {
   const body = await request<ModelInfoResponse>("/model-info");
 
   assertShape(isRecord(body.training_ranges), "training_ranges is missing");
+  assertShape(isRecord(body.physical_ranges), "physical_ranges is missing");
   assertShape(isRecord(body.defaults), "defaults is missing");
   assertShape(
     isRecord(body.feature_influence?.features),

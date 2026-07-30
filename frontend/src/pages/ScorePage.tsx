@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useMemo, useRef, useState } from "react";
 
 import { ApiError, predict } from "../api";
 import { ClaimForm, buildPayload, type FormValues } from "../components/ClaimForm";
@@ -24,6 +24,32 @@ const ResultCard = lazy(() =>
  * if nothing happened — but we do not delete it either; we mark it "stale".
  * Leaving it silently would invite reading it as belonging to the edited input;
  * removing it entirely would destroy the ability to compare.
+ *
+ * WHY A REQUEST GENERATION GUARD, NOT DISABLED FIELDS
+ * -----------------------------------------------------
+ * Fields stay editable and "Clear form" stays clickable while a `/predict`
+ * request is in flight — disabling them would punish someone on a slow
+ * connection by locking the form for the whole round trip. That means a
+ * request can be superseded by a form edit or a reset before it resolves, in
+ * two different ways that both need guarding:
+ *
+ * 1. RESET/RE-SUBMIT while the OLD request is still in flight: `requestIdRef`
+ *    is bumped on every submit and on every reset; a response is only applied
+ *    to state (`setResult`/`setStale`/`setFieldErrors`/`setSubmitting`) if it
+ *    still matches the id that was current when it was sent. Both the success
+ *    path and the error path check this, and so does `finally` — otherwise a
+ *    slow, superseded request could flip `submitting` back to false while a
+ *    newer one is in flight, or paint an unrelated/late 422 onto a form the
+ *    user has since changed or cleared.
+ * 2. EDIT (not reset/re-submit) while the SAME request is still in flight:
+ *    `requestIdRef` does not change here, so the id check above lets the
+ *    response through — correctly, it is still the answer to the question the
+ *    user asked. What must NOT happen is the success handler unconditionally
+ *    marking that answer "fresh": if a field was touched after the request
+ *    was sent, the response no longer describes what is on screen.
+ *    `editedSinceRequestRef` tracks exactly that (reset to false when a
+ *    request starts, set to true by every `handleChange`), and the success
+ *    handler restores `stale` from it instead of hard-coding `false`.
  */
 export function ScorePage({ info }: { info: ModelInfoResponse }) {
   const [values, setValues] = useState<FormValues>({});
@@ -32,6 +58,13 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  /** Bumped by every submit attempt so a closed field group can re-open when a
+   *  fresh submission produces an error inside it (see `FieldGroupSection`). */
+  const [attempt, setAttempt] = useState(0);
+  /** Identifies the most recently issued `/predict` request; see the comment above. */
+  const requestIdRef = useRef(0);
+  /** Has any field been touched since the in-flight request was sent? See point 2 above. */
+  const editedSinceRequestRef = useRef(false);
 
   const oodFields = useMemo(
     () => new Set(stale ? [] : (result?.out_of_distribution_warnings ?? [])),
@@ -41,6 +74,7 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
   const handleChange = useCallback((name: string, value: string) => {
     setValues((previous) => ({ ...previous, [name]: value }));
     setStale(true);
+    editedSinceRequestRef.current = true;
     // Touching a field clears its error; if it is still invalid the server will
     // say so again on the next submission.
     setFieldErrors((previous) => {
@@ -52,14 +86,33 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
   }, []);
 
   const handleSubmit = useCallback(async () => {
+    setAttempt((previous) => previous + 1);
+
+    const { payload, fieldErrors: buildErrors } = buildPayload(values, info);
+    if (Object.keys(buildErrors).length > 0) {
+      // Invalid values (e.g. a non-finite number) never leave the browser: no
+      // request is sent, the field is flagged the same way a 422 would flag it.
+      setFieldErrors((previous) => ({ ...previous, ...buildErrors }));
+      setFormError("Some fields were rejected — details are shown under each one.");
+      return;
+    }
+
+    // Captured once per submit; a response is only applied to state if this id
+    // is still the current one when it resolves (see the class doc-comment).
+    const requestId = ++requestIdRef.current;
+    editedSinceRequestRef.current = false;
     setSubmitting(true);
     setFormError(null);
     try {
-      const response = await predict(buildPayload(values, info));
+      const response = await predict(payload);
+      if (requestIdRef.current !== requestId) return; // superseded by a newer submit or a reset
       setResult(response);
-      setStale(false);
+      // Not hard-coded to `false`: if the form was edited while this request
+      // was in flight, the answer we just received is already stale.
+      setStale(editedSinceRequestRef.current);
       setFieldErrors({});
     } catch (error) {
+      if (requestIdRef.current !== requestId) return; // ditto — a stale error must not paint the current form
       if (error instanceof ApiError && error.kind === "validation") {
         setFieldErrors(error.fieldErrors);
         setFormError(
@@ -73,16 +126,21 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
         );
       }
     } finally {
-      setSubmitting(false);
+      if (requestIdRef.current === requestId) setSubmitting(false);
     }
   }, [values, info]);
 
   const handleReset = useCallback(() => {
+    // Invalidates any in-flight request: when it resolves, its id will no
+    // longer match `requestIdRef.current` and its callbacks will no-op.
+    requestIdRef.current += 1;
+    editedSinceRequestRef.current = false;
     setValues({});
     setFieldErrors({});
     setFormError(null);
     setResult(null);
     setStale(false);
+    setSubmitting(false);
   }, []);
 
   return (
@@ -100,11 +158,16 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
           info={info}
           values={values}
           onChange={handleChange}
+          // `handleSubmit` swallows every error internally (try/catch) and
+          // never rejects, so passing it here cannot produce an unhandled
+          // rejection.
+          // eslint-disable-next-line @typescript-eslint/no-misused-promises
           onSubmit={handleSubmit}
           onReset={handleReset}
           fieldErrors={fieldErrors}
           oodFields={oodFields}
           submitting={submitting}
+          attempt={attempt}
         />
       </div>
 

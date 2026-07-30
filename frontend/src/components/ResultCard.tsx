@@ -74,18 +74,27 @@ export function ResultCard({
         </div>
 
         {/* The threshold markers show where on the scale we landed; the
-            thresholds come from the backend, the frontend keeps no copy. */}
+            thresholds come from the backend, the frontend keeps no copy. Their
+            horizontal position is the ACTUAL threshold percentage (not an
+            evenly-spaced guess) so the labels stay correct if the backend ever
+            changes the cut points. */}
         <div className="relative mt-4 h-2.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
           <div
             className={`h-full rounded-full transition-all ${presentation.bar}`}
             style={{ width: `${Math.min(100, Math.max(0, percentage))}%` }}
           />
         </div>
-        <div className="mt-1.5 flex justify-between text-[11px] text-slate-400 dark:text-slate-500">
-          <span>0</span>
-          <span>medium at {(info.risk_thresholds.low_below * 100).toFixed(0)}%</span>
-          <span>high at {(info.risk_thresholds.high_at_or_above * 100).toFixed(0)}%</span>
-          <span>100</span>
+        <div className="relative mt-1.5 h-3.5 w-full text-[11px] text-slate-400 dark:text-slate-500">
+          <span className="absolute left-0">0</span>
+          <ThresholdLabel
+            percent={info.risk_thresholds.low_below * 100}
+            label={`medium at ${(info.risk_thresholds.low_below * 100).toFixed(0)}%`}
+          />
+          <ThresholdLabel
+            percent={info.risk_thresholds.high_at_or_above * 100}
+            label={`high at ${(info.risk_thresholds.high_at_or_above * 100).toFixed(0)}%`}
+          />
+          <span className="absolute right-0">100</span>
         </div>
 
         <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
@@ -160,6 +169,30 @@ function OodBanner({ fields, info }: { fields: string[]; info: ModelInfoResponse
         </div>
       </div>
     </section>
+  );
+}
+
+/**
+ * A single threshold label, positioned at its REAL percentage along the bar
+ * (`left: X%`), not spaced evenly with `flex justify-between` — the two are
+ * only close by coincidence for today's 35/65 thresholds.
+ *
+ * Near either edge the label is anchored by its start/end instead of its
+ * center, so its text stays inside the bar instead of spilling past 0%/100%.
+ */
+function ThresholdLabel({ percent, label }: { percent: number; label: string }) {
+  const clamped = Math.min(100, Math.max(0, percent));
+  const nearStart = clamped <= 12;
+  const nearEnd = clamped >= 88;
+  const translateX = nearStart ? "0%" : nearEnd ? "-100%" : "-50%";
+
+  return (
+    <span
+      className="absolute top-0 whitespace-nowrap"
+      style={{ left: `${clamped}%`, transform: `translateX(${translateX})` }}
+    >
+      {label}
+    </span>
   );
 }
 
