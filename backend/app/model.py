@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import platform
 import threading
 from pathlib import Path
@@ -127,6 +128,70 @@ EXPECTED_CONTRACT_STEPS = {
 
 class ArtifactError(RuntimeError):
     """The artifact is missing or disagrees with the metadata — do not start."""
+
+
+# --------------------------------------------------------------------------- #
+# `_shap_lock` wait timeout (Phase 7, reviewer C2 follow-up)
+# --------------------------------------------------------------------------- #
+#
+# `_shap_lock` serialises SHAP explanations because `shap`'s LightGBM branch
+# mutates `explainer.expected_value` on every call (see `ModelBundle.__init__`).
+# That lock has no bound on its own: if enough concurrent `/predict` requests
+# queue up, every one of them blocks forever waiting its turn, and the client
+# never times out either — it just hangs. The rate limiter in `main.py` caps
+# how many requests from ONE client can even reach this point, but distinct
+# clients (or a single client racing multiple browser tabs) are not capped by
+# it, so an unbounded wait here is still reachable.
+#
+# The fix bounds the WAIT only, never the computation: once the lock is
+# acquired, the explanation always finishes uninterrupted (this matters for
+# `test_concurrent_predictions_are_bitwise_identical`, which depends on every
+# request completing a full, uncut critical section).
+
+SHAP_LOCK_TIMEOUT_ENV = "SHAP_LOCK_TIMEOUT_SECONDS"
+
+# A single explanation takes about a millisecond (see `ModelBundle.__init__`),
+# so under normal load the queue drains almost instantly. 10s is generous
+# enough to absorb a burst without false positives in the test suite or in a
+# lightly loaded deploy, while still failing a pathologically long queue fast
+# instead of hanging the request indefinitely.
+DEFAULT_SHAP_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class ShapLockConfigurationError(ValueError):
+    """`SHAP_LOCK_TIMEOUT_SECONDS` is set but is not a positive number."""
+
+
+class ShapLockTimeoutError(RuntimeError):
+    """The shared SHAP explainer lock could not be acquired before the timeout.
+
+    Raised from inside a request, not at startup — `main.py` maps it to a 503
+    with a `Retry-After` header rather than letting the request hang or 500.
+    """
+
+
+def get_shap_lock_timeout_seconds() -> float:
+    """Reads `SHAP_LOCK_TIMEOUT_SECONDS`, falling back to the default.
+
+    Read PER CALL (not cached at startup) so tests can shrink the timeout with
+    `monkeypatch.setenv` for a single request without reloading the whole
+    artifact — loading `pipeline.pkl` and constructing the `TreeExplainer` is
+    expensive and scoped to session lifetime (see `tests/conftest.py`).
+    """
+    raw = os.getenv(SHAP_LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_SHAP_LOCK_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ShapLockConfigurationError(
+            f"{SHAP_LOCK_TIMEOUT_ENV} must be a number, got {raw!r}."
+        ) from exc
+    if value <= 0:
+        raise ShapLockConfigurationError(
+            f"{SHAP_LOCK_TIMEOUT_ENV} must be positive, got {value!r}."
+        )
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -498,7 +563,14 @@ class ModelBundle:
         same object — "they must be the same" becomes a structural property of
         the code rather than a comment.
         """
-        with self._shap_lock:
+        timeout = get_shap_lock_timeout_seconds()
+        if not self._shap_lock.acquire(timeout=timeout):
+            raise ShapLockTimeoutError(
+                f"Timed out after {timeout:g}s waiting for the shared SHAP explainer "
+                "lock; too many concurrent /predict requests are queued ahead of "
+                "this one."
+            )
+        try:
             # The `explainer(X)` (Explanation API) form is preferred:
             # `shap_values()` emits a UserWarning on every call for binary
             # LightGBM models — log noise on every request. The two are
@@ -507,6 +579,8 @@ class ModelBundle:
             values, base_value = _select_positive_class(
                 explanation.values, explanation.base_values, self._positive_index
             )
+        finally:
+            self._shap_lock.release()
         return values, base_value
 
     def _transform(self, frame: pd.DataFrame) -> pd.DataFrame:

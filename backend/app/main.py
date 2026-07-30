@@ -52,12 +52,15 @@ WHAT IT DOES, AND WHY IT DOES IT THIS WAY
 
 from __future__ import annotations
 
+import math
 import os
+import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -69,6 +72,7 @@ from app.model import (
     RISK_THRESHOLD_HIGH,
     RISK_THRESHOLD_MEDIUM,
     ModelBundle,
+    ShapLockTimeoutError,
 )
 from app.schemas import (
     CalibrationInfo,
@@ -136,6 +140,204 @@ def get_allowed_origins() -> list[str]:
         )
 
     return origins
+
+
+# --------------------------------------------------------------------------- #
+# Rate limiting — `/predict` only (Phase 7, reviewer C1 follow-up)
+# --------------------------------------------------------------------------- #
+#
+# WHY `/predict` ONLY, NOT A GLOBAL LIMIT:
+# `/predict` is the one endpoint that runs LightGBM inference AND a SHAP
+# explanation (CPU-bound, and the SHAP half is additionally serialised behind
+# `ModelBundle._shap_lock`). `/model-info` only reads `metadata.json` already
+# held in memory — there is no model call to protect, so throttling it would
+# add friction with no security benefit. `/health` is DELIBERATELY EXEMPT: HF
+# Spaces (and any uptime monitor) polls it on a fixed schedule that has nothing
+# to do with the caller's own request volume, and a healthcheck that starts
+# returning 429 under load is worse than one with no limit at all — it turns a
+# real problem (slow inference) into a second, fake one (the platform thinks
+# the service is down).
+#
+# WHY STDLIB-ONLY / IN-PROCESS:
+# No new dependency (`slowapi` etc.) was introduced on purpose. HF Spaces free
+# tier runs a single container with a single worker (see the Dockerfile), so an
+# in-process counter is not silently wrong the way it would be behind multiple
+# workers or replicas — there is exactly one process, so there is exactly one
+# counter.
+
+RATE_LIMIT_PER_MINUTE_ENV = "RATE_LIMIT_PER_MINUTE"
+
+# A generous-but-real default for a single-user demo: a human filling in the
+# form and re-submitting a few times will never hit it, but a script hammering
+# the endpoint will. Deploy-time tuning happens purely through the environment
+# variable — no code change, same pattern as `ALLOWED_ORIGINS`.
+DEFAULT_RATE_LIMIT_PER_MINUTE = 30
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+
+
+class RateLimitConfigurationError(ValueError):
+    """`RATE_LIMIT_PER_MINUTE` is set but is not a positive integer."""
+
+
+def get_rate_limit_per_minute() -> int:
+    """Reads `RATE_LIMIT_PER_MINUTE`, falling back to the default.
+
+    Fails at startup (not silently at request time) on a non-integer or
+    non-positive value — the same fail-fast stance as `get_allowed_origins()`.
+    """
+    raw = os.getenv(RATE_LIMIT_PER_MINUTE_ENV)
+    if raw is None:
+        return DEFAULT_RATE_LIMIT_PER_MINUTE
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RateLimitConfigurationError(
+            f"{RATE_LIMIT_PER_MINUTE_ENV} must be an integer, got {raw!r}."
+        ) from exc
+    if value <= 0:
+        raise RateLimitConfigurationError(
+            f"{RATE_LIMIT_PER_MINUTE_ENV} must be a positive integer, got {value}."
+        )
+    return value
+
+
+class _FixedWindowRateLimiter:
+    """Per-key fixed-window request counter, with bounded memory.
+
+    WHY FIXED WINDOW, NOT A TOKEN BUCKET:
+    A fixed window is the simplest counter that needs no background thread and
+    no per-key floating-point bookkeeping: one integer window index and one
+    integer count per key. Its known downside — a burst straddling a window
+    boundary can briefly admit up to ~2x the limit — is an acceptable tradeoff
+    for a demo project's abuse control, not a hard billing/SLA guarantee.
+
+    BOUNDED MEMORY (the point the task explicitly calls out): every key from a
+    PAST window is dropped the first time any request is handled in a new
+    window (`_sweep_if_due`). Memory is therefore bounded by "how many distinct
+    keys were active in the current window", not by how many have EVER been
+    seen. The one residual risk — many distinct keys created within a SINGLE
+    window (e.g. an attacker rotating a spoofed `X-Forwarded-For` value on
+    every request) — is bounded in turn by how many requests per second this
+    single-worker process can physically accept; it is not unbounded across
+    time the way a sweep-free map would be.
+    """
+
+    def __init__(self, limit: int, window_seconds: float = RATE_LIMIT_WINDOW_SECONDS) -> None:
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._lock = threading.Lock()
+        self._buckets: dict[str, tuple[int, int]] = {}  # key -> (window_index, count)
+        self._last_swept_window = self._current_window()
+
+    def _current_window(self) -> int:
+        # `time.monotonic()` (not `time.time()`): never affected by a wall-clock
+        # adjustment, and nothing here needs an actual calendar time.
+        return int(time.monotonic() // self.window_seconds)
+
+    def check(self, key: str) -> tuple[bool, float]:
+        """Returns `(allowed, retry_after_seconds)` and records one request for `key`."""
+        window = self._current_window()
+        with self._lock:
+            self._sweep_if_due(window)
+            stored_window, count = self._buckets.get(key, (window, 0))
+            if stored_window != window:
+                stored_window, count = window, 0
+            count += 1
+            self._buckets[key] = (stored_window, count)
+            if count > self.limit:
+                elapsed_in_window = time.monotonic() % self.window_seconds
+                retry_after = self.window_seconds - elapsed_in_window
+                return False, retry_after
+            return True, 0.0
+
+    def _sweep_if_due(self, window: int) -> None:
+        """Drops every key whose bucket is not from the CURRENT window.
+
+        Runs at most once per window change (not on every request), which keeps
+        the common case at O(1); the eviction pass itself is O(active keys),
+        paid once per window rather than once per request.
+        """
+        if window == self._last_swept_window:
+            return
+        self._last_swept_window = window
+        stale = [key for key, (stored_window, _) in self._buckets.items() if stored_window != window]
+        for key in stale:
+            del self._buckets[key]
+
+
+def _client_key(request: Request) -> str:
+    """Best-effort per-client identity for the rate limiter.
+
+    THE HONEST LIMIT OF THIS FUNCTION (documented, not "solved"):
+    HF Spaces runs the application behind its own reverse proxy, so
+    `request.client.host` is the PROXY's address for every caller alike —
+    using it alone would rate-limit "everyone behind the proxy" as a single
+    client, which is not the intent.
+
+    The alternative, `X-Forwarded-For`, is a request header and therefore
+    ATTACKER-CONTROLLED: nothing stops a client from sending
+    `X-Forwarded-For: 1.2.3.4` (or a comma-separated LIST of fabricated
+    addresses) to obtain a fresh bucket on every request. Taking the FIRST
+    entry blindly — the common naive mistake — makes the limiter a no-op
+    against exactly the abuse it exists for, since that is the one entry a
+    client fully controls.
+
+    THE TRADEOFF ACTUALLY MADE HERE: take the LAST entry of `X-Forwarded-For`
+    if the header is present, on the assumption that there is exactly ONE
+    proxy hop between the client and this process, and that the proxy APPENDS
+    the peer address it received the connection from (the standard reverse
+    proxy convention) rather than relaying the client's header untouched. If
+    that assumption does not hold for HF Spaces' proxy — e.g. it forwards the
+    client's header verbatim, or there are multiple hops — this degrades to
+    trusting client-supplied input, and the limiter becomes a soft speed bump
+    rather than a hard boundary. This has NOT been verified against HF's actual
+    infrastructure (no way to do so short of deploying); if it turns out to be
+    false, the fix is to key on a value the proxy is known to set reliably
+    (e.g. a platform-specific header) instead of `X-Forwarded-For`. When the
+    header is absent entirely (local `uvicorn`, the test suite), `request.
+    client.host` is exactly right and is used as-is.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        candidate = forwarded.split(",")[-1].strip()
+        if candidate:
+            return candidate
+    client = request.client
+    return client.host if client is not None else "unknown"
+
+
+def get_rate_limiter(request: Request) -> _FixedWindowRateLimiter:
+    """Dependency that hands the per-app limiter instance to the route.
+
+    Reading it off `request.app.state` (rather than a module-level global)
+    means each `create_app()` call gets its OWN limiter — exactly what lets
+    tests build an isolated app with a tiny `RATE_LIMIT_PER_MINUTE` without
+    disturbing the shared session-scoped `client` fixture used everywhere
+    else (see `tests/conftest.py`).
+    """
+    return request.app.state.rate_limiter
+
+
+def enforce_predict_rate_limit(
+    request: Request,
+    limiter: Annotated[_FixedWindowRateLimiter, Depends(get_rate_limiter)],
+) -> None:
+    """Raises 429 once `key`'s request count exceeds the configured limit.
+
+    The body is a fixed, generic string — never the caller's IP/key or any
+    other per-client state, in keeping with the same "do not leak anything
+    beyond the documented contract" rule applied to `/predict`'s response.
+    """
+    allowed, retry_after = limiter.check(_client_key(request))
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests. Please slow down and retry shortly.",
+            headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+        )
+
+
+RateLimitDep = Annotated[None, Depends(enforce_predict_rate_limit)]
 
 
 # --------------------------------------------------------------------------- #
@@ -352,6 +554,34 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
 
 
 # --------------------------------------------------------------------------- #
+# SHAP lock timeout -> 503 (Phase 7, reviewer C2 follow-up)
+# --------------------------------------------------------------------------- #
+
+# How long a CLIENT is told to wait before retrying. Deliberately a small,
+# fixed constant rather than echoing `model.get_shap_lock_timeout_seconds()`
+# back: a client that just waited the full timeout and got bumped should be
+# told to try again SOON (the queue is draining at roughly one request per
+# millisecond — see `ModelBundle.__init__`), not to wait another full timeout
+# window, which would compound under sustained load instead of recovering.
+SHAP_LOCK_TIMEOUT_RETRY_AFTER_SECONDS = 2
+
+
+async def shap_lock_timeout_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Maps `ShapLockTimeoutError` to a 503 instead of a request that hangs or 500s.
+
+    503 (Service Unavailable), not 429: this is not about the CALLER's request
+    rate (that is `enforce_predict_rate_limit`'s job and returns 429) — it is
+    the SERVER reporting that it cannot currently serve the request within a
+    bounded time, which is exactly what 503 + `Retry-After` means.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "The service is busy handling other requests. Please retry shortly."},
+        headers={"Retry-After": str(SHAP_LOCK_TIMEOUT_RETRY_AFTER_SECONDS)},
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Application lifecycle
 # --------------------------------------------------------------------------- #
 
@@ -400,12 +630,17 @@ def health(bundle: BundleDep) -> HealthResponse:
 
 
 @router.post("/predict", response_model=PredictResponse, tags=["inference"])
-def predict(payload: PredictRequest, bundle: BundleDep) -> PredictResponse:
+def predict(payload: PredictRequest, bundle: BundleDep, _rate_limit: RateLimitDep) -> PredictResponse:
     """Scores a single claim and explains it with SHAP contributions.
 
     `by_alias=True`: so the `capital-gains` / `capital-loss` fields come out with
     the pipeline's (hyphenated) column names. `model.py` assumes the keys are
     metadata column names; dumping without aliases would break that assumption.
+
+    `_rate_limit` is unused beyond its side effect: it raises 429 before this
+    body ever runs once the per-client limit is exceeded (see
+    `enforce_predict_rate_limit`). Only this endpoint carries it — see the
+    "Rate limiting" section above for why `/model-info` and `/health` do not.
     """
     result = bundle.predict(payload.model_dump(by_alias=True))
     return PredictResponse.model_validate(result)
@@ -467,8 +702,9 @@ def model_info(bundle: BundleDep) -> ModelInfoResponse:
 def create_app() -> FastAPI:
     """Builds the application. CORS origins are read IN THIS CALL, not at import time.
 
-    Tests can call this factory with different `ALLOWED_ORIGINS` values and verify
-    the behaviour with a real HTTP request; the wiring is now observable.
+    Tests can call this factory with different `ALLOWED_ORIGINS` (and
+    `RATE_LIMIT_PER_MINUTE`) values and verify the behaviour with a real HTTP
+    request; the wiring is now observable.
     """
     application = FastAPI(
         title="Insurance Fraud Detection API",
@@ -483,7 +719,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # One limiter instance PER APPLICATION (not a module-level global): each
+    # `create_app()` call — including the ones tests build with a fresh
+    # `RATE_LIMIT_PER_MINUTE` — gets its own isolated counter.
+    application.state.rate_limiter = _FixedWindowRateLimiter(get_rate_limit_per_minute())
+
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
+    application.add_exception_handler(ShapLockTimeoutError, shap_lock_timeout_handler)
 
     # MIDDLEWARE ORDER MATTERS: `add_middleware` prepends to the list on every
     # call, so the LAST one added ends up outermost. We want CORS outermost so

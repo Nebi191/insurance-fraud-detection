@@ -20,11 +20,12 @@
  * exercises the exact function the fix lives in without going through a
  * `<input type="number">` element at all.
  */
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, predict } from "../api";
+import { COLD_START_HINT_THRESHOLD_MS } from "../coldStart";
 import { buildModelInfoFixture, buildPredictResponseFixture } from "../testUtils/modelInfoFixture";
 import type { PredictResponse } from "../types";
 import { ScorePage } from "./ScorePage";
@@ -146,5 +147,107 @@ describe("ScorePage — request generation race guard", () => {
     expect(screen.queryByText(/Some fields were rejected/)).not.toBeInTheDocument();
     expect(screen.queryByText(/did not pass validation/)).not.toBeInTheDocument();
     expect(screen.getByLabelText<HTMLInputElement>("Witnesses").value).toBe("");
+  });
+});
+
+/**
+ * Cold-start hint (Phase 7): a `/predict` that is still in flight past
+ * `COLD_START_HINT_THRESHOLD_MS` shows the same "waking the scoring service"
+ * hint `App` shows for a slow `/model-info` — see `src/coldStart.ts` for why
+ * this needs to be duplicated for `/predict` rather than covered once at
+ * startup (a tab left open past the Space's 48h inactivity window can submit
+ * into a re-slept container). `vi.useFakeTimers()` drives the threshold
+ * deterministically; `userEvent` is configured with `delay: null` so its
+ * own internal (real) delays between keystrokes/clicks are skipped rather
+ * than left waiting on a `setTimeout` that fake timers never advance on
+ * their own.
+ *
+ * The submit button is triggered with `fireEvent.click` here, not
+ * `userEvent.click`: `userEvent` schedules its own real timers internally
+ * (pointer/event-loop bookkeeping) even with `delay: null`, which deadlocks
+ * once `vi.useFakeTimers()` is active and nothing is left to advance them.
+ * `fireEvent` dispatches the DOM event synchronously with no timer of its
+ * own, which is all a plain button click needs.
+ */
+describe("ScorePage — cold-start hint while a /predict request is in flight", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not show the hint before the threshold elapses", async () => {
+    predictMock.mockReset();
+    const info = buildModelInfoFixture();
+    const deferred = createDeferred<PredictResponse>();
+    predictMock.mockReturnValueOnce(deferred.promise);
+
+    render(<ScorePage info={info} />);
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Score claim" }));
+    });
+
+    expect(screen.queryByText(/Waking the scoring service/)).not.toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(COLD_START_HINT_THRESHOLD_MS - 1);
+    });
+
+    expect(screen.queryByText(/Waking the scoring service/)).not.toBeInTheDocument();
+
+    // Settle the request so it does not leak into the next test.
+    await act(async () => {
+      deferred.resolve(buildPredictResponseFixture());
+      await flushMicrotasks();
+    });
+  });
+
+  it("shows the hint once the request has run past the threshold, and retires it on resolve", async () => {
+    predictMock.mockReset();
+    const info = buildModelInfoFixture();
+    const deferred = createDeferred<PredictResponse>();
+    predictMock.mockReturnValueOnce(deferred.promise);
+
+    render(<ScorePage info={info} />);
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Score claim" }));
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(COLD_START_HINT_THRESHOLD_MS);
+    });
+
+    expect(screen.getByText(/Waking the scoring service/)).toBeInTheDocument();
+
+    await act(async () => {
+      deferred.resolve(buildPredictResponseFixture());
+      await flushMicrotasks();
+    });
+
+    // The hint must not outlive the request it describes.
+    expect(screen.queryByText(/Waking the scoring service/)).not.toBeInTheDocument();
+  });
+
+  it("never shows the hint for a request that resolves before the threshold", async () => {
+    predictMock.mockReset();
+    const info = buildModelInfoFixture();
+    predictMock.mockResolvedValueOnce(buildPredictResponseFixture());
+
+    render(<ScorePage info={info} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Score claim" }));
+      await flushMicrotasks();
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(COLD_START_HINT_THRESHOLD_MS * 2);
+    });
+
+    expect(screen.queryByText(/Waking the scoring service/)).not.toBeInTheDocument();
   });
 });

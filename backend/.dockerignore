@@ -1,0 +1,35 @@
+# Excluded from the Docker build context (Hugging Face Spaces, Docker SDK).
+# Each group below is excluded for a distinct reason — see the comment on it.
+
+# --- Test suite: never runs inside the image ---
+# No test package is installed in the image (see requirements.txt / Dockerfile
+# comments); shipping the test files themselves would be dead weight with no
+# corresponding code to run them.
+tests/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# --- Lint tooling: development/CI only ---
+# ruff never runs inside the container; its config and cache are pure noise in
+# a production image.
+ruff.toml
+.ruff_cache/
+
+# --- Dev-only dependency list ---
+# The Dockerfile installs ONLY requirements.txt. Copying requirements-dev.txt
+# into the build context would risk someone "fixing" a broken build by
+# pointing the Dockerfile at it, silently pulling pytest/ruff into the image.
+requirements-dev.txt
+
+# --- Editor / OS artefacts: never relevant to the running service ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- VCS metadata: irrelevant to the built image and can be large ---
+.git/
+.gitignore

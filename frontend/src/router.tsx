@@ -14,9 +14,12 @@
  * Nothing was lost: two routes need nothing more than `pushState` plus a
  * `popstate` listener. Shareable URLs and the browser back button still work.
  *
- * PHASE 7 NOTE: Netlify needs a `_redirects` file for SPA routing
- * (`/* /index.html 200`), otherwise navigating straight to `/model-card` returns
- * a 404. That would have been required with react-router too.
+ * PHASE 7 NOTE: Netlify needs an SPA fallback rewrite (`/* -> /index.html`,
+ * status 200) or navigating straight to `/model-card` returns a 404 — Netlify
+ * serves static files, and no `model-card.html` exists on disk. This repo
+ * declares that rewrite in the root `netlify.toml` (see the comment there for
+ * why that file, and not a `frontend/public/_redirects`, is the one source of
+ * truth). That would have been required with react-router too.
  */
 
 /* eslint-disable react-refresh/only-export-components -- `useRoute` and

@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useMemo, useRef, useState } from "react";
 
 import { ApiError, predict } from "../api";
 import { ClaimForm, buildPayload, type FormValues } from "../components/ClaimForm";
+import { COLD_START_HINT_MESSAGE, useColdStartHint } from "../coldStart";
 import type { ModelInfoResponse, PredictResponse } from "../types";
 
 /**
@@ -58,6 +59,13 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // See `../coldStart.ts`. The very first `/predict` after the page loads is
+  // already covered by `App`'s `/model-info` cold-start hint in the common
+  // case (that request wakes the Space, and `ScorePage` only mounts once it
+  // has answered) — but a tab left open past the Space's 48h inactivity
+  // window can still hit a re-slept container on submit, so the same
+  // threshold-gated hint applies here too, independently.
+  const showColdStartHint = useColdStartHint(submitting);
   /** Bumped by every submit attempt so a closed field group can re-open when a
    *  fresh submission produces an error inside it (see `FieldGroupSection`). */
   const [attempt, setAttempt] = useState(0);
@@ -167,6 +175,7 @@ export function ScorePage({ info }: { info: ModelInfoResponse }) {
           fieldErrors={fieldErrors}
           oodFields={oodFields}
           submitting={submitting}
+          coldStartHint={showColdStartHint ? COLD_START_HINT_MESSAGE : null}
           attempt={attempt}
         />
       </div>

@@ -5,14 +5,14 @@ __pycache__/
 venv/
 *.pkl
 
-# NOT: `data/` ve `insurance_claims.csv` BİLEREK ignore edilmiyor.
-# Gerekçe: `data/insurance_claims.csv` herkese açık bir Kaggle veri seti
-# (265 KB, gizli/kişisel veri değil). Repoda tutulmazsa temiz bir clone'da
-# `python backend/train_pipeline.py` koşamaz ve Faz 0'ın yeniden
-# üretilebilirliği yalnızca tek bir makinede geçerli olur.
+# NOTE: `data/` and `insurance_claims.csv` are DELIBERATELY not ignored.
+# `data/insurance_claims.csv` is a public Kaggle dataset (265 KB, nothing
+# confidential or personal). Without it in the repo, `python
+# backend/train_pipeline.py` cannot run on a fresh clone, and Phase 0's
+# reproducibility would hold on exactly one machine.
 
-# Konsolide edilmiş model artefaktı commit EDİLİR.
-# Gerekçe: backend Hugging Face Spaces'e Docker imajı olarak deploy ediliyor;
-# imaj build'i sırasında model eğitilmiyor, repodan kopyalanıyor. Dosya ~165 KB,
-# git için sorun değil. Yukarıdaki `*.pkl` kuralının istisnasıdır.
+# The consolidated model artifact IS committed — an exception to `*.pkl` above.
+# The backend deploys to Hugging Face Spaces as a Docker image, and the image
+# build does not train the model, it copies it from the repo. The file is
+# ~165 KB, which git does not care about.
 !backend/models/pipeline.pkl

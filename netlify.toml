@@ -1,0 +1,66 @@
+# Netlify site configuration.
+#
+# WHY THIS FILE LIVES AT THE REPO ROOT, NOT INSIDE `frontend/`
+# -------------------------------------------------------------
+# Netlify reads `netlify.toml` from wherever the site's base directory is
+# configured to look, but pointing a Netlify site at a subdirectory of a
+# monorepo still means giving Netlify the REPO root as the connected
+# directory; `base` below is what tells it to descend into `frontend/` before
+# doing anything else. Keeping the file at the root (rather than inside
+# `frontend/`) makes that monorepo relationship explicit instead of implicit.
+#
+# NODE VERSION
+# ------------
+# Pinned to the major version this project was developed and verified against
+# (`node -v` on the dev machine: v24.18.0) — not guessed. Vite 7 requires Node
+# 20.19+/22.12+, so this is comfortably within range.
+#
+# SPA FALLBACK: HERE, NOT A `_redirects` FILE
+# --------------------------------------------
+# Netlify supports the same rewrite either as a `[[redirects]]` block here or
+# as a plain-text `frontend/public/_redirects` file — never both at once, they
+# would double up. This file already has to exist for `base`/`command`/
+# `publish`, so keeping the redirect here too means a single canonical place
+# for every Netlify-specific decision, instead of splitting them across two
+# files that could quietly drift out of sync (e.g. someone changes `publish`
+# here without noticing `_redirects` still assumed the old one).
+#
+# The rewrite MUST use status 200 (a rewrite), not 301/302 (a redirect):
+# `frontend/src/router.tsx` resolves the page purely from
+# `window.location.pathname` on load, so the browser has to keep showing
+# `/model-card` in the address bar while being SERVED `index.html`'s content.
+# A 301/302 would instead bounce the browser to a *different* URL.
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "24"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Generic, static security headers. NOT included: a Content-Security-Policy.
+# This app renders SHAP bars/waterfalls with recharts and sets inline `style`
+# attributes directly from three of our own components (`ResultCard.tsx`,
+# `ModelCardPage.tsx`, `ShapChart.tsx`) — both recharts' SVG output and React's
+# `style` prop mean a real `style-src` would need `'unsafe-inline'` to avoid
+# breaking the chart and the result card, which defeats most of the point of
+# adding one. Verifying a *stricter* policy (nonces/hashes per dynamic style)
+# would require asserting against the app's actual runtime behaviour in a real
+# browser across every page/state (charts, dark mode, error banners) — not
+# something this change can honestly claim to have done. A CSP that is wrong
+# in a way nobody caught is worse than no CSP, so it is left out; the three
+# headers below don't have that failure mode; they only restrict framing,
+# MIME-sniffing and referrer/permission leakage, none of which the app relies
+# on, so there is nothing in this build they can plausibly break.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"

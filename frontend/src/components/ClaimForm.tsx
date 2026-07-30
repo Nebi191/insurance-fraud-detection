@@ -74,6 +74,9 @@ interface ClaimFormProps {
   fieldErrors: Record<string, string>;
   oodFields: Set<string>;
   submitting: boolean;
+  /** Non-null once a `/predict` request has been running past the cold-start
+   *  threshold; see `../coldStart.ts`. Rendered next to the submit button. */
+  coldStartHint: string | null;
   /** Bumped by the caller on every submit attempt; see `FieldGroupSection`. */
   attempt: number;
 }
@@ -87,6 +90,7 @@ export function ClaimForm({
   fieldErrors,
   oodFields,
   submitting,
+  coldStartHint,
   attempt,
 }: ClaimFormProps) {
   const filledCount = Object.values(values).filter((value) => value.trim() !== "").length;
@@ -128,26 +132,36 @@ export function ClaimForm({
         />
       ))}
 
-      <div className="sticky bottom-0 -mx-1 flex flex-wrap items-center gap-3 border-t border-slate-200 bg-slate-50/95 px-1 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/95">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-sky-700 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-sky-600 dark:hover:bg-sky-500"
-        >
-          {submitting ? "Scoring…" : "Score claim"}
-        </button>
-        <button
-          type="button"
-          onClick={onReset}
-          className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-        >
-          Clear form
-        </button>
-        <span className="text-xs text-slate-500 dark:text-slate-400">
-          {filledCount === 0
-            ? "No fields filled in — all 34 will use their defaults."
-            : `${filledCount} filled in, the remaining ${34 - filledCount} will use their defaults.`}
-        </span>
+      <div className="sticky bottom-0 -mx-1 flex flex-col gap-2 border-t border-slate-200 bg-slate-50/95 px-1 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/95">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="submit"
+            disabled={submitting}
+            className="rounded-lg bg-sky-700 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-sky-600 dark:hover:bg-sky-500"
+          >
+            {submitting ? "Scoring…" : "Score claim"}
+          </button>
+          <button
+            type="button"
+            onClick={onReset}
+            className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            Clear form
+          </button>
+          <span className="text-xs text-slate-500 dark:text-slate-400">
+            {filledCount === 0
+              ? "No fields filled in — all 34 will use their defaults."
+              : `${filledCount} filled in, the remaining ${34 - filledCount} will use their defaults.`}
+          </span>
+        </div>
+        {coldStartHint && (
+          <p
+            role="status"
+            className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            {coldStartHint}
+          </p>
+        )}
       </div>
     </form>
   );

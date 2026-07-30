@@ -1,0 +1,33 @@
+# Development / CI dependencies — test runner + linter.
+#
+# NOT INSTALLED IN THE DOCKER IMAGE (Phase 7). `backend/Dockerfile` installs
+# only `requirements.txt`; no test package belongs in a production image
+# (image size + needless attack surface). This file exists purely for local
+# development and CI, and pulls the runtime pins in via `-r requirements.txt`
+# so `pip install -r requirements-dev.txt` is still the single command that
+# sets up a full dev environment.
+-r requirements.txt
+
+# --- Test dependencies (Phase 1) ---
+# The versions are taken verbatim from `pip freeze` output; none were guessed.
+# `httpx` is a runtime dependency of `fastapi.testclient.TestClient` — we never
+# import it directly, but TestClient cannot be constructed without it.
+pytest==9.1.1
+iniconfig==2.3.0          # pytest
+pluggy==1.6.0             # pytest
+httpx==0.28.1             # fastapi.testclient
+httpcore==1.0.9           # httpx
+certifi==2026.6.17        # httpx
+
+# --- Lint (development/CI only) ---
+# Pinned because ruff's DEFAULT rule set widens between releases: 0.16 enables
+# B/S/SIM/UP/TRY/RUF rules that earlier versions did not. An unpinned ruff would
+# make CI go red on a day nobody touched the code. See ruff.toml for the layout
+# configuration.
+ruff==0.16.0
+
+# NOTE: starlette 1.3.1 emits a StarletteDeprecation warning when used with httpx
+# ("install httpx2 instead"). The tests run fine; migrating to httpx2 was
+# DELIBERATELY DEFERRED — it is not Phase 1's subject, and changing a pinned
+# version set for the sake of the test client is separate work to be done without
+# risking pickle compatibility.

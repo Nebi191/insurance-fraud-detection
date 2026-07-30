@@ -119,7 +119,114 @@ Design decisions worth calling out:
 **Frontend — React + Vite + TypeScript + Tailwind**, with the SHAP chart rendered
 via recharts and a model card page fed entirely from `/model-info`.
 
-Deployment (Hugging Face Spaces + Netlify) is the remaining phase.
+---
+
+## 🌐 Deployment
+
+Deploy the **backend first** — the frontend needs its URL at build time.
+
+**Backend — Hugging Face Spaces (Docker)**
+
+Spaces builds from the root of the Space repository, so the contents of
+`backend/` go to the Space root (not the `backend/` folder itself). Both files
+Spaces needs are already there: `backend/Dockerfile` and a `backend/README.md`
+whose YAML frontmatter declares `sdk: docker` and `app_port: 7860`.
+
+1. Create a new Space, **SDK: Docker**, blank template.
+2. Copy the contents of `backend/` to the Space repo root and push. `README.md`
+   must land at the root — Spaces reads its frontmatter as the build config.
+3. **Settings -> Variables and secrets:** set `ALLOWED_ORIGINS` to the Netlify
+   origin, e.g. `https://<site>.netlify.app` (scheme included, no trailing
+   slash, no wildcard — the app refuses to start on `*`). Leave it unset and it
+   defaults to `http://localhost:5173`, which means the deployed frontend gets
+   blocked by CORS. Optional: `RATE_LIMIT_PER_MINUTE` (default 30) and
+   `SHAP_LOCK_TIMEOUT_SECONDS` (default 10).
+
+The image installs `requirements.txt` only — never `requirements-dev.txt`; no
+test or lint package belongs in a production image. It runs as a non-root user
+and strips the write bit from `models/`, because `joblib.load()` reads an
+unsigned pickle and unpickling is equivalent to executing code: an artifact that
+the serving process could overwrite would turn any write primitive into code
+execution on the next restart.
+
+`libgomp1` is installed explicitly. LightGBM's compiled backend links against
+OpenMP, which `python:*-slim` strips, and without it `import lightgbm` fails
+outright — a container that dies at startup, not a subtle degradation.
+
+**Free-tier caveat:** a Space sleeps after 48 hours of inactivity and takes
+~30–60 s to wake. The frontend detects a slow first request and says so instead
+of showing an unexplained spinner.
+
+**Frontend — Netlify**
+
+**Frontend — Netlify**
+
+This is a monorepo — Netlify is pointed at the whole repository, and the root
+`netlify.toml` tells it to treat `frontend/` as the site:
+
+```toml
+[build]
+  base = "frontend"        # descend into frontend/ before building
+  command = "npm run build"
+  publish = "dist"         # -> frontend/dist, resolved relative to `base`
+```
+
+To connect the site:
+
+1. Netlify -> **Add new site -> Import an existing project**, pick this repo.
+   Netlify reads `netlify.toml` from the repo root automatically; the `base`
+   key above means the build/publish settings below apply even though the
+   file sits outside `frontend/`.
+2. **Site configuration -> Environment variables -> Add a variable:**
+   `VITE_API_URL` = the deployed backend's URL, e.g.
+   `https://<hf-username>-<space-name>.hf.space` (no trailing slash needed).
+   See `frontend/.env.example` for the same value, documented for local use.
+   **This is a build-time variable** — Vite inlines `import.meta.env.VITE_API_URL`
+   into the bundled JS while `vite build` runs; changing it in Netlify's
+   dashboard has no effect until the next deploy re-runs the build. Locally,
+   leaving it unset falls back to `http://127.0.0.1:8000`.
+3. Deploy. Netlify picks up `netlify.toml`'s `NODE_VERSION` automatically.
+
+**Why the SPA needs an explicit rewrite:** the app has two routes
+(`/` and `/model-card`, see `frontend/src/router.tsx`) but is a single static
+`index.html` — there is no `model-card.html` on disk. Netlify serves static
+files by default, so opening `/model-card` directly (or refreshing on it)
+would 404 without a fallback rule. `netlify.toml` declares:
+
+```toml
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200   # a REWRITE, not a redirect — the URL in the address bar must not change
+```
+
+(`status = 200` matters: a 301/302 would bounce the browser to a different URL
+instead of serving `index.html`'s content while `/model-card` stays in the
+address bar, which is what the client-side router expects on load.)
+
+This lives in `netlify.toml` rather than a `frontend/public/_redirects` file —
+both work, but putting it beside the `base`/`command`/`publish` settings that
+already have to live in this file keeps every Netlify-specific decision in one
+place instead of two files that could quietly drift apart.
+
+`netlify.toml` also sets a few static security headers (`X-Frame-Options`,
+`X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`) that don't
+restrict anything the app relies on. It deliberately does **not** set a
+Content-Security-Policy: this app sets inline `style` attributes (React's
+`style` prop, used in three components, plus recharts' SVG output), so a real
+`style-src` would need `'unsafe-inline'` to avoid breaking the SHAP chart and
+result card — which gives up most of the protection a CSP is meant to add. An
+unverified, broken CSP is worse than none, so it was left out rather than
+shipped half-checked.
+
+**Cold start, honestly disclosed:** the backend's free-tier host sleeps after
+inactivity; the first request after a sleep takes roughly 30-60 seconds
+instead of instant. Rather than let that look like a hang, the UI switches to
+an explicit "Waking the scoring service…" message once a request has been
+running longer than a few seconds (see `frontend/src/coldStart.ts` for the
+threshold and the reasoning) — both on the initial `/model-info` load and on
+`/predict`, since a tab left open across the inactivity window can hit a
+re-slept container on submit too.
 
 ---
 
@@ -134,7 +241,11 @@ cd insurance-fraud-detection
 **Backend** (the dataset is already in the repo at `data/insurance_claims.csv`):
 
 ```bash
-pip install -r backend/requirements.txt
+# requirements-dev.txt pulls requirements.txt in too (`-r requirements.txt`),
+# so this one command installs both runtime and test/lint dependencies.
+# The Docker image (Phase 7) installs ONLY requirements.txt — no test package
+# belongs in a production image.
+pip install -r backend/requirements-dev.txt
 
 # Optional — reproduce the packaged artifact from the CSV.
 # Deterministic: the same input yields a bit-identical pipeline.pkl.
@@ -143,7 +254,7 @@ python backend/train_pipeline.py
 cd backend
 python -m uvicorn app.main:app --port 8000
 # Interactive API docs: http://127.0.0.1:8000/docs
-python -m pytest              # 128 tests
+python -m pytest              # 147 tests
 ```
 
 **Frontend:**

@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { API_BASE_URL, ApiError, fetchModelInfo } from "./api";
+import { COLD_START_HINT_MESSAGE, useColdStartHint } from "./coldStart";
 import { assertFieldsCoverContract } from "./fields";
 import { ModelCardPage } from "./pages/ModelCardPage";
 import { ScorePage } from "./pages/ScorePage";
@@ -28,6 +29,7 @@ export default function App() {
   const { theme, toggle } = useTheme();
   const { route, navigate } = useRoute();
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const showColdStartHint = useColdStartHint(state.status === "loading");
 
   const load = useCallback(async () => {
     setState({ status: "loading" });
@@ -84,7 +86,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6">
-        {state.status === "loading" && <LoadingState />}
+        {state.status === "loading" && <LoadingState showColdStartHint={showColdStartHint} />}
         {state.status === "error" && (
           // `load` swallows every error internally (try/catch) and never
           // rejects, so passing it here cannot produce an unhandled rejection.
@@ -141,10 +143,15 @@ function NavLink({
   );
 }
 
-function LoadingState() {
+function LoadingState({ showColdStartHint }: { showColdStartHint: boolean }) {
   return (
     <div className="flex flex-col gap-4" aria-busy="true" aria-live="polite">
       <p className="text-sm text-slate-500 dark:text-slate-400">Loading model info…</p>
+      {showColdStartHint && (
+        <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          {COLD_START_HINT_MESSAGE}
+        </p>
+      )}
       <div className="h-32 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-800" />
       <div className="h-64 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-800" />
     </div>

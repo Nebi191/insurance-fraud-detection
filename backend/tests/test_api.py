@@ -31,15 +31,22 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic.fields import FieldInfo
 
+from app import main as main_module
 from app import model as model_module
 from app.main import (
     ALLOWED_ORIGINS_ENV,
     DEFAULT_ALLOWED_ORIGINS,
+    DEFAULT_RATE_LIMIT_PER_MINUTE,
     MAX_REQUEST_BODY_BYTES,
+    RATE_LIMIT_PER_MINUTE_ENV,
     CorsConfigurationError,
+    RateLimitConfigurationError,
+    _client_key,
+    _FixedWindowRateLimiter,
     app,
     create_app,
     get_allowed_origins,
+    get_rate_limit_per_minute,
     model_info,
 )
 from app.model import (
@@ -48,10 +55,14 @@ from app.model import (
     PIPELINE_PATH,
     RISK_THRESHOLD_HIGH,
     RISK_THRESHOLD_MEDIUM,
+    SHAP_LOCK_TIMEOUT_ENV,
     ArtifactError,
     ModelBundle,
+    ShapLockConfigurationError,
+    ShapLockTimeoutError,
     _positive_class_index,
     classify_risk,
+    get_shap_lock_timeout_seconds,
 )
 from app.schemas import PREDICT_REQUEST_EXAMPLE, PredictRequest
 
@@ -1651,3 +1662,205 @@ def test_missing_positive_class_fails_fast_instead_of_guessing(
     # The real artifact must be unaffected: the positive class is 1 and its index
     # is found correctly.
     assert _positive_class_index(bundle.pipeline.named_steps["model"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 21) Rate limiting — `/predict` only (Phase 7)
+# --------------------------------------------------------------------------- #
+#
+# The shared, session-scoped `client` fixture is deliberately AVOIDED for the
+# "exceeded" cases: `tests/conftest.py` gives that app an effectively unlimited
+# `RATE_LIMIT_PER_MINUTE` so the rest of the suite is not order-dependent on
+# how many `/predict` calls came before it. Each test below builds its OWN app
+# via `create_app()` with a small, explicit limit instead (the same pattern
+# `test_cors_wiring_reflects_allowed_origin_and_rejects_others` already uses
+# for `ALLOWED_ORIGINS`).
+
+
+def test_rate_limit_per_minute_env_defaults_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(RATE_LIMIT_PER_MINUTE_ENV, raising=False)
+    assert get_rate_limit_per_minute() == DEFAULT_RATE_LIMIT_PER_MINUTE == 30
+
+    monkeypatch.setenv(RATE_LIMIT_PER_MINUTE_ENV, "5")
+    assert get_rate_limit_per_minute() == 5
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "0", "-1", "1.5"])
+def test_rate_limit_per_minute_rejects_invalid_values_at_startup(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A malformed `RATE_LIMIT_PER_MINUTE` must fail fast, not silently disable itself."""
+    monkeypatch.setenv(RATE_LIMIT_PER_MINUTE_ENV, value)
+    with pytest.raises(RateLimitConfigurationError):
+        get_rate_limit_per_minute()
+    with pytest.raises(RateLimitConfigurationError):
+        create_app()
+
+
+def test_predict_rate_limit_returns_429_with_retry_after_once_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(RATE_LIMIT_PER_MINUTE_ENV, "2")
+    with TestClient(create_app()) as scoped:
+        first = scoped.post("/predict", json=PREDICT_REQUEST_EXAMPLE)
+        second = scoped.post("/predict", json=PREDICT_REQUEST_EXAMPLE)
+        assert first.status_code == 200
+        assert second.status_code == 200
+
+        third = scoped.post("/predict", json=PREDICT_REQUEST_EXAMPLE)
+        assert third.status_code == 429
+        retry_after = third.headers.get("retry-after")
+        assert retry_after is not None
+        assert int(retry_after) >= 1
+
+        # The body must be generic: no IP, no per-client counter, nothing beyond
+        # a fixed message (the same "do not leak anything beyond the documented
+        # contract" rule `/predict`'s success response follows).
+        assert third.json() == {"detail": "Too many requests. Please slow down and retry shortly."}
+
+
+def test_health_and_model_info_are_exempt_from_the_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF's healthcheck/uptime polling must never see a 429."""
+    monkeypatch.setenv(RATE_LIMIT_PER_MINUTE_ENV, "1")
+    with TestClient(create_app()) as scoped:
+        for _ in range(5):
+            assert scoped.get("/health").status_code == 200
+        for _ in range(5):
+            assert scoped.get("/model-info").status_code == 200
+
+        # Sanity check on the SAME app: with limit=1, `/predict` really does
+        # trip on the second call — proving the limiter is live, not merely
+        # unreachable from these two routes.
+        assert scoped.post("/predict", json=PREDICT_REQUEST_EXAMPLE).status_code == 200
+        assert scoped.post("/predict", json=PREDICT_REQUEST_EXAMPLE).status_code == 429
+
+
+def test_client_key_uses_the_last_hop_of_x_forwarded_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Documents the honest tradeoff: the LAST entry is taken, never the first.
+
+    Taking the first entry blindly would let a client set its own key on every
+    request (`X-Forwarded-For: <anything-i-like>`), which makes a rate limiter a
+    no-op. Taking the last entry assumes exactly one trusted proxy hop that
+    APPENDS the peer address (see `_client_key`'s docstring for the caveat).
+    """
+
+    def _request(headers: dict[str, str], client_host: str | None = "203.0.113.5") -> Any:
+        from starlette.requests import Request
+
+        scope = {
+            "type": "http",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": (client_host, 12345) if client_host is not None else None,
+        }
+        return Request(scope)
+
+    spoofed_first_hop = _request({"x-forwarded-for": "1.2.3.4, 10.0.0.9"})
+    assert _client_key(spoofed_first_hop) == "10.0.0.9"
+
+    no_header = _request({})
+    assert _client_key(no_header) == "203.0.113.5"
+
+    no_header_no_client = _request({}, client_host=None)
+    assert _client_key(no_header_no_client) == "unknown"
+
+
+def test_fixed_window_rate_limiter_sweeps_stale_keys_on_window_rollover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded memory: a key from a PAST window must be dropped, not accumulate forever."""
+    fake_now = [0.0]
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: fake_now[0])
+
+    limiter = _FixedWindowRateLimiter(limit=10, window_seconds=60.0)
+    limiter.check("stale-client")
+    assert "stale-client" in limiter._buckets
+
+    fake_now[0] = 61.0  # one full window later
+    limiter.check("fresh-client")
+
+    assert "stale-client" not in limiter._buckets, "a key from a past window was never swept"
+    assert set(limiter._buckets) == {"fresh-client"}
+
+
+def test_fixed_window_rate_limiter_resets_the_same_key_after_its_window_elapses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_now = [0.0]
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: fake_now[0])
+
+    limiter = _FixedWindowRateLimiter(limit=1, window_seconds=60.0)
+    assert limiter.check("a") == (True, 0.0)
+
+    allowed, retry_after = limiter.check("a")
+    assert allowed is False
+    assert retry_after == pytest.approx(60.0)
+
+    fake_now[0] = 61.0
+    allowed, _ = limiter.check("a")
+    assert allowed is True
+
+
+# --------------------------------------------------------------------------- #
+# 22) `_shap_lock` wait timeout (Phase 7)
+# --------------------------------------------------------------------------- #
+
+
+def test_shap_lock_timeout_seconds_defaults_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(SHAP_LOCK_TIMEOUT_ENV, raising=False)
+    assert get_shap_lock_timeout_seconds() == pytest.approx(10.0)
+
+    monkeypatch.setenv(SHAP_LOCK_TIMEOUT_ENV, "0.25")
+    assert get_shap_lock_timeout_seconds() == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "0", "-1"])
+def test_shap_lock_timeout_seconds_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv(SHAP_LOCK_TIMEOUT_ENV, value)
+    with pytest.raises(ShapLockConfigurationError):
+        get_shap_lock_timeout_seconds()
+
+
+def test_shap_for_transformed_raises_when_the_lock_cannot_be_acquired_in_time(
+    bundle: ModelBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The WAIT is bounded; this does not touch the computation itself (see below)."""
+    monkeypatch.setenv(SHAP_LOCK_TIMEOUT_ENV, "0.05")
+    frame = bundle.prepare_row({})
+    transformed = bundle._transform(frame)
+
+    bundle._shap_lock.acquire()
+    try:
+        with pytest.raises(ShapLockTimeoutError):
+            bundle._shap_for_transformed(transformed)
+    finally:
+        bundle._shap_lock.release()
+
+
+def test_shap_lock_timeout_returns_503_with_retry_after_over_http(
+    client: TestClient, bundle: ModelBundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(SHAP_LOCK_TIMEOUT_ENV, "0.05")
+    bundle._shap_lock.acquire()
+    try:
+        response = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE)
+    finally:
+        bundle._shap_lock.release()
+
+    assert response.status_code == 503
+    assert response.headers.get("retry-after") is not None
+    assert response.json() == {
+        "detail": "The service is busy handling other requests. Please retry shortly."
+    }
+
+
+def test_shap_lock_timeout_does_not_trigger_on_the_normal_unlocked_path(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the lock free, even a tiny timeout must not fire — the wait is near-zero."""
+    monkeypatch.setenv(SHAP_LOCK_TIMEOUT_ENV, "5")
+    response = client.post("/predict", json=PREDICT_REQUEST_EXAMPLE)
+    assert response.status_code == 200
