@@ -13,7 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { API_BASE_URL, ApiError, fetchModelInfo } from "./api";
 import { COLD_START_HINT_MESSAGE, useColdStartHint } from "./coldStart";
-import { assertFieldsCoverContract } from "./fields";
+import { assertFieldsCoverContract, warnIfHighlightGroupIsStale } from "./fields";
 import { ModelCardPage } from "./pages/ModelCardPage";
 import { ScorePage } from "./pages/ScorePage";
 import { RouteLink, useRoute } from "./router";
@@ -39,6 +39,10 @@ export default function App() {
       // quiet: a missing field is an input the user can never see, and an extra
       // field means every request gets a 422 because of `extra="forbid"`.
       assertFieldsCoverContract(info.feature_list.pipeline_input_order);
+      // Unlike the assertion above, a stale showcase group is a presentation
+      // staleness, not a broken contract — it warns instead of blocking
+      // startup. See `warnIfHighlightGroupIsStale` in `./fields` for why.
+      warnIfHighlightGroupIsStale(info.feature_influence);
       setState({ status: "ready", info });
     } catch (error) {
       setState({

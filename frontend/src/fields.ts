@@ -17,6 +17,8 @@
  * a quietly incomplete form.
  */
 
+import type { ModelInfoResponse } from "./types";
+
 export interface FieldMeta {
   /** API field name, hyphenated exactly as the contract spells it (`capital-gains`). */
   name: string;
@@ -41,6 +43,12 @@ export interface FieldGroup {
  * 353, incident_severity 173, policy_annual_premium 107, capital-gains 75,
  * auto_year 74, witnesses 37. The list is fixed here because which fields go in
  * the shop window is a presentation decision; the badges come from measurement.
+ *
+ * THIS DECISION CAN GO STALE: retraining the model can drop one of these six to
+ * `has_influence: false` without anyone touching this file. `App.tsx` calls
+ * `warnIfHighlightGroupIsStale()` on every successful `/model-info` load to
+ * catch exactly that — see the function below for why it warns instead of
+ * failing startup.
  */
 export const HIGHLIGHT_GROUP: FieldGroup = {
   id: "highlights",
@@ -204,4 +212,61 @@ export function assertFieldsCoverContract(pipelineInputOrder: string[]): void {
         "src/fields.ts needs updating.",
     );
   }
+}
+
+/**
+ * Returns the `HIGHLIGHT_GROUP` fields the artifact's MEASURED influence no
+ * longer backs up (`has_influence` is `false` or the field is missing from
+ * `feature_influence` entirely — both count as "not actually among the
+ * effective ones").
+ *
+ * Pure and side-effect free on purpose: this is what a unit test asserts
+ * against directly, without needing to spy on `console.warn`.
+ */
+export function findStaleHighlightGroupFields(
+  featureInfluence: ModelInfoResponse["feature_influence"],
+): FieldMeta[] {
+  return HIGHLIGHT_GROUP.fields.filter(
+    (field) => featureInfluence.features[field.name]?.has_influence !== true,
+  );
+}
+
+/**
+ * Warns — loudly, but WITHOUT stopping the app — when `HIGHLIGHT_GROUP` (see
+ * above) no longer matches the artifact's measured `feature_influence`.
+ *
+ * WHY A WARNING AND NOT A THROWN ERROR (unlike `assertFieldsCoverContract`):
+ * which six fields sit in the showcase is a presentation decision a human
+ * made, not a data contract the app can enforce. Throwing here would turn a
+ * routine retrain into a blank screen in front of a client watching the demo,
+ * over a cosmetic staleness that a form the user can still fully use does not
+ * warrant. `assertFieldsCoverContract` fails hard because its failure mode is
+ * "the user cannot see or submit a field that exists" — a real, immediate
+ * capability loss. This failure mode is "the six spotlighted fields are a
+ * slightly outdated recommendation" — the rest of the form (every field, its
+ * range, its `unused by model` badge) still renders correctly from the same
+ * `/model-info` response, so there is nothing to protect the user from.
+ *
+ * WHY NOT LEAVE IT TO A TEST ALONE: a test only runs when someone remembers to
+ * run it, typically BEFORE a retrain, not after the freshly retrained artifact
+ * is dropped into `backend/models/`. A console warning fires the moment the
+ * exact artifact in front of a developer disagrees with this file, including
+ * during manual QA of a freshly deployed backend — which is when it is most
+ * likely to be noticed AND acted on. The unit test below covers the pure
+ * check's correctness; this function covers when it actually gets checked.
+ */
+export function warnIfHighlightGroupIsStale(
+  featureInfluence: ModelInfoResponse["feature_influence"],
+): void {
+  const stale = findStaleHighlightGroupFields(featureInfluence);
+  if (stale.length === 0) return;
+
+  console.warn(
+    "[HIGHLIGHT_GROUP stale] src/fields.ts showcases " +
+      `${stale.map((field) => field.name).join(", ")} as one of the model's strongest ` +
+      "drivers, but the current artifact's feature_influence says the trained trees do " +
+      "not split on it (has_influence: false) — the model was likely retrained. " +
+      "HIGHLIGHT_GROUP needs a human to pick new fields; this is a presentation " +
+      "decision, not something the app corrects on its own.",
+  );
 }

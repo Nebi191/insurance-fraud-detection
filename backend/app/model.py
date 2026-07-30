@@ -352,8 +352,36 @@ class ModelBundle:
                 "Run `python backend/train_pipeline.py` first."
             )
 
-        pipeline = joblib.load(PIPELINE_PATH)
-        metadata = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
+        # Both files EXIST at this point (the `missing` check above already
+        # covers "not there at all"), but existing is not the same as valid: a
+        # half-copied Docker layer or a disk-full write on a HF Spaces deploy can
+        # leave a truncated pickle or a cut-off JSON file behind. Without the
+        # try/except below, `joblib.load` on a corrupt pickle can raise almost
+        # anything the pickle VM happens to hit first — observed in practice:
+        # `EOFError` (truncated stream) and `KeyError` (unrecognised opcode on
+        # non-pickle bytes) for the pipeline, `json.JSONDecodeError` for the
+        # metadata. None of those is `ArtifactError`, so an un-wrapped corrupt
+        # artifact would crash startup with a raw traceback instead of the clean,
+        # actionable message the rest of this module promises (K1 fail-fast).
+        try:
+            pipeline = joblib.load(PIPELINE_PATH)
+        except Exception as exc:
+            raise ArtifactError(
+                f"Failed to load pipeline artifact at {PIPELINE_PATH}: "
+                f"{exc.__class__.__name__}: {exc}. The file exists but could not be "
+                "unpickled — it is likely truncated or corrupted (e.g. a partial "
+                "copy/download). Re-run `python backend/train_pipeline.py` or "
+                "re-deploy the artifact."
+            ) from exc
+
+        try:
+            metadata = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ArtifactError(
+                f"Failed to parse metadata JSON at {METADATA_PATH}: {exc}. The file "
+                "exists but is not valid JSON — it is likely truncated or corrupted. "
+                "Re-run `python backend/train_pipeline.py` or re-deploy the artifact."
+            ) from exc
 
         bundle = cls(pipeline, metadata)
         bundle._verify_contract()

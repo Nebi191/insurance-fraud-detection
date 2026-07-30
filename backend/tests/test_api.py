@@ -21,6 +21,7 @@ import copy
 import json
 import logging
 import math
+import random
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, get_args
@@ -124,6 +125,71 @@ def test_app_refuses_to_start_without_artifact(
     monkeypatch.setattr(model_module, "METADATA_PATH", tmp_path / "missing.json")
     with pytest.raises(model_module.ArtifactError), TestClient(app):
         pass  # pragma: no cover - unreachable
+
+
+# "Not found" (above) is not the only way an artifact can be broken: a file can
+# exist on disk but be corrupt — exactly what a half-copied Docker layer or an
+# interrupted upload to HF Spaces looks like. The two tests below never touch the
+# real `backend/models/` artifacts; they redirect `PIPELINE_PATH`/`METADATA_PATH`
+# to throwaway files under `tmp_path` (built from a genuine copy or from
+# unrelated bytes) and restore the module globals via `monkeypatch`, which undoes
+# the patch automatically at teardown even if the test raises.
+
+
+def test_truncated_pipeline_pickle_fails_fast_with_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A pipeline.pkl that exists but is truncated must raise `ArtifactError`, not a raw pickle error.
+
+    Simulates a half-written artifact (e.g. an interrupted copy/download): we
+    copy the REAL pipeline.pkl's bytes and cut them in half, so the file exists
+    and looks plausible but cannot be unpickled. Before this test's underlying
+    fix, `joblib.load` surfaced whatever the pickle VM happened to raise first
+    (observed: `EOFError`) instead of the clean, actionable `ArtifactError` every
+    other startup failure in this module produces.
+    """
+    real_bytes = model_module.PIPELINE_PATH.read_bytes()
+    truncated = tmp_path / "pipeline.pkl"
+    truncated.write_bytes(real_bytes[: len(real_bytes) // 2])
+
+    monkeypatch.setattr(model_module, "PIPELINE_PATH", truncated)
+    with pytest.raises(model_module.ArtifactError, match="Failed to load pipeline artifact"):
+        ModelBundle.load()
+
+
+def test_garbage_pipeline_pickle_fails_fast_with_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A pipeline.pkl replaced with unrelated bytes must also raise a clean `ArtifactError`.
+
+    Distinct from the truncation case above: bytes that are not a pickle stream
+    AT ALL (rather than a valid stream cut short) can hit a different failure
+    inside the pickle VM (observed: `KeyError` on an unrecognised opcode). Both
+    failure modes must be caught by the same `try/except` in `ModelBundle.load()`.
+    """
+    garbage = tmp_path / "pipeline.pkl"
+    garbage.write_bytes(b"this is not a pickle file" * 50)
+
+    monkeypatch.setattr(model_module, "PIPELINE_PATH", garbage)
+    with pytest.raises(model_module.ArtifactError, match="Failed to load pipeline artifact"):
+        ModelBundle.load()
+
+
+def test_invalid_metadata_json_fails_fast_with_a_clean_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A metadata.json that exists but is not valid JSON must raise `ArtifactError`, not a raw `JSONDecodeError`.
+
+    Simulates the same class of half-written artifact as the pickle tests above,
+    on the other file. Before this test's underlying fix, `json.loads` let
+    `json.JSONDecodeError` propagate unwrapped out of `ModelBundle.load()`.
+    """
+    broken = tmp_path / "metadata.json"
+    broken.write_text('{"feature_list": ', encoding="utf-8")  # truncated mid-object
+
+    monkeypatch.setattr(model_module, "METADATA_PATH", broken)
+    with pytest.raises(model_module.ArtifactError, match="Failed to parse metadata JSON"):
+        ModelBundle.load()
 
 
 # --------------------------------------------------------------------------- #
@@ -1014,6 +1080,128 @@ def test_concurrent_predictions_are_bitwise_identical(client: TestClient) -> Non
 
     assert len({probability for probability, _ in results}) == 1
     assert len({shap_blob for _, shap_blob in results}) == 1
+
+
+# Four payloads chosen to be genuinely DIFFERENT from one another: distinct
+# `incident_severity`, distinct numeric fields, and — verified below — distinct
+# `fraud_probability` AND distinct `out_of_distribution_warnings` sets. That last
+# property is the point: a leakage bug that copied one in-flight request's
+# features/warnings onto another's response would be invisible with same-payload
+# bursts (see `test_concurrent_predictions_are_bitwise_identical` above) but is
+# exactly what a mismatched OOD list would expose here.
+_CONCURRENT_DISTINCT_PAYLOADS = [
+    PREDICT_REQUEST_EXAMPLE,
+    {
+        "incident_severity": "Trivial Damage",
+        "incident_type": "Parked Car",
+        "collision_type": "Front Collision",
+        "auto_year": 2005,
+        "number_of_vehicles_involved": 1,
+        "witnesses": 9,
+        "age": 110,
+        "police_report_available": "NO",
+        "capital-gains": 0,
+        "capital-loss": 0,
+        "total_claim_amount": 5000,
+    },
+    {
+        "incident_severity": "Total Loss",
+        "incident_type": "Vehicle Theft",
+        "collision_type": "Side Collision",
+        "auto_year": 2000,
+        "number_of_vehicles_involved": 50,
+        "witnesses": 0,
+        "police_report_available": "YES",
+        "capital-gains": 999999,
+        "capital-loss": 0,
+        "total_claim_amount": 60000,
+    },
+    {
+        "incident_severity": "Minor Damage",
+        "incident_type": "Multi-vehicle Collision",
+        "collision_type": "Rear Collision",
+        "auto_year": 2010,
+        "number_of_vehicles_involved": 2,
+        "witnesses": 1,
+        "police_report_available": "YES",
+        "capital-gains": 10000,
+        "capital-loss": -200000,
+        "total_claim_amount": 200000,
+    },
+]
+
+
+def test_concurrent_predictions_with_different_payloads_do_not_leak_across_requests(
+    client: TestClient,
+) -> None:
+    """A high-concurrency burst of DIFFERENT payloads must not cross-contaminate.
+
+    `test_concurrent_predictions_are_bitwise_identical` only proves the shared
+    `_shap_lock`/explainer state is deterministic when every in-flight request
+    carries the SAME input; it would stay green even if the lock silently let one
+    request's feature row (and therefore its SHAP values / OOD warnings) leak into
+    another's response, as long as the burst happened to be uniform. This test
+    closes that gap: it records each payload's response SERIALLY first (the
+    ground truth for "what should this exact input produce"), then fires all of
+    them again, interleaved, at high concurrency, and asserts every concurrent
+    response is byte-for-byte identical to its own serial reference —
+    `fraud_probability`, `risk_level`, `shap_values` and
+    `out_of_distribution_warnings` included (comparing the whole response body
+    covers all four at once).
+
+    Uses the shared `client` fixture, whose app was built with
+    `RATE_LIMIT_PER_MINUTE=100000` (see `conftest.py`) — without that override a
+    burst this size could legitimately hit 429 and the test would fail for a
+    reason that has nothing to do with the leakage this test targets. The 200
+    check below exists specifically to catch that failure mode and tell it apart
+    from a real mismatch.
+    """
+    payloads = _CONCURRENT_DISTINCT_PAYLOADS
+
+    # Serial ground truth, one request at a time, no concurrency involved yet.
+    reference = [client.post("/predict", json=payload).json() for payload in payloads]
+
+    # Sanity check on the fixture itself: if the payloads above stopped being
+    # distinguishable (e.g. after a metadata/training-range change), this test
+    # would silently lose its ability to detect leakage. Fail loudly instead.
+    distinct_warning_sets = {frozenset(r["out_of_distribution_warnings"]) for r in reference}
+    distinct_probabilities = {r["fraud_probability"] for r in reference}
+    assert len(distinct_warning_sets) == len(payloads), (
+        "test payloads no longer each trigger a distinct set of OOD warnings — "
+        "this test cannot detect cross-request leakage without that"
+    )
+    assert len(distinct_probabilities) == len(payloads), (
+        "test payloads no longer each produce a distinct fraud_probability"
+    )
+
+    # Interleave many repeats of the 4 payloads in a fixed, shuffled order (not
+    # round-robin) so genuinely different inputs race each other inside the
+    # thread pool, then fire them at the shared client concurrently.
+    repeats = 13
+    order = list(range(len(payloads))) * repeats
+    random.Random(0).shuffle(order)
+
+    def call(index: int) -> tuple[int, int, dict[str, Any]]:
+        response = client.post("/predict", json=payloads[index])
+        return index, response.status_code, response.json()
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(call, order))
+
+    statuses = {status for _, status, _ in results}
+    assert statuses == {200}, (
+        f"expected every concurrent request to return 200, got statuses={statuses} "
+        "(a 429 here means the rate limiter fired, not that leakage was found — "
+        "check that `client` still resolves RATE_LIMIT_PER_MINUTE to a high value)"
+    )
+
+    for index, _status, body in results:
+        assert body == reference[index], (
+            f"payload {index} ({payloads[index].get('incident_severity')!r}) did not "
+            "reproduce its own serial reference response under concurrency — the "
+            "shared SHAP explainer/lock is leaking state between requests with "
+            "DIFFERENT inputs"
+        )
 
 
 def test_split_transform_matches_full_pipeline_bitwise(bundle: ModelBundle) -> None:

@@ -1,5 +1,8 @@
 /**
- * The claim form — 34 fields, every one of them optional.
+ * The claim form — every field the API contract declares, every one of them
+ * optional. The exact count is never hard-coded here; it is read at render
+ * time from `info.feature_list.pipeline_input_order`, the same artifact-derived
+ * list `assertFieldsCoverContract` already checks the form against at startup.
  *
  * LAYOUT DECISION
  * ---------------
@@ -11,7 +14,8 @@
  * BLANK MEANS NOT SENT
  * `buildPayload` only packs fields that were filled in. The backend fills the
  * rest with the training median/mode, and the guardrail only checks fields that
- * were actually SENT — that is why an empty form does not produce 34 warnings.
+ * were actually SENT — that is why an empty form does not produce a warning per
+ * field.
  *
  * A NON-FINITE NUMBER IS REJECTED, NOT DROPPED
  * `type="number"` still lets someone type something like `1e999`, and
@@ -94,6 +98,11 @@ export function ClaimForm({
   attempt,
 }: ClaimFormProps) {
   const filledCount = Object.values(values).filter((value) => value.trim() !== "").length;
+  // Derived from the artifact, not hand-counted: `assertFieldsCoverContract`
+  // (see `../fields.ts`) already guarantees at startup that this equals
+  // `ALL_FIELD_NAMES.length`, so either would be correct — this one names the
+  // API contract as the source explicitly.
+  const totalFieldCount = info.feature_list.pipeline_input_order.length;
 
   return (
     <form
@@ -150,8 +159,10 @@ export function ClaimForm({
           </button>
           <span className="text-xs text-slate-500 dark:text-slate-400">
             {filledCount === 0
-              ? "No fields filled in — all 34 will use their defaults."
-              : `${filledCount} filled in, the remaining ${34 - filledCount} will use their defaults.`}
+              ? `No fields filled in — all ${totalFieldCount} will use their defaults.`
+              : `${filledCount} filled in, the remaining ${
+                  totalFieldCount - filledCount
+                } will use their defaults.`}
           </span>
         </div>
         {coldStartHint && (
