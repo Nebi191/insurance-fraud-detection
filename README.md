@@ -133,14 +133,22 @@ Spaces needs are already there: `backend/Dockerfile` and a `backend/README.md`
 whose YAML frontmatter declares `sdk: docker` and `app_port: 7860`.
 
 1. Create a new Space, **SDK: Docker**, blank template.
-2. Copy the contents of `backend/` to the Space repo root and push. `README.md`
-   must land at the root — Spaces reads its frontmatter as the build config.
+2. Clone the Space and copy the contents of `backend/` into the clone, then
+   commit and push. `README.md` must land at the Space root — Spaces reads its
+   frontmatter as the build config.
+
+   Do **not** use `git subtree push` for this. The Hub rejects binary files that
+   are not tracked by LFS/Xet regardless of size, and `models/pipeline.pkl` is a
+   plain blob in this repository — a subtree push is rejected outright. Worse, a
+   forced one would delete the Space's own `.gitattributes`, which is exactly
+   what makes the push work: it already tracks `*.pkl` through LFS, so copying
+   the file into a clone of the Space converts it to a pointer automatically.
 3. **Settings -> Variables and secrets:** set `ALLOWED_ORIGINS` to the Netlify
    origin, e.g. `https://<site>.netlify.app` (scheme included, no trailing
-   slash, no wildcard — the app refuses to start on `*`). Leave it unset and it
-   defaults to `http://localhost:5173`, which means the deployed frontend gets
-   blocked by CORS. Optional: `RATE_LIMIT_PER_MINUTE` (default 30) and
-   `SHAP_LOCK_TIMEOUT_SECONDS` (default 10).
+   slash, no wildcard — the app refuses to start on `*`). Optional:
+   `RATE_LIMIT_PER_MINUTE` (default 30) and `SHAP_LOCK_TIMEOUT_SECONDS`
+   (default 10). See the CORS caveat below for what this setting does and does
+   not achieve on this particular platform.
 
 The image installs `requirements.txt` only — never `requirements-dev.txt`; no
 test or lint package belongs in a production image. It runs as a non-root user
@@ -156,6 +164,29 @@ outright — a container that dies at startup, not a subtle degradation.
 **Free-tier caveat:** a Space sleeps after 48 hours of inactivity and takes
 ~30–60 s to wake. The frontend detects a slow first request and says so instead
 of showing an unexplained spinner.
+
+**CORS caveat — the allowlist does not take effect on Spaces.** Measured against
+the live deployment: an origin that is *not* in `ALLOWED_ORIGINS` still receives
+`Access-Control-Allow-Origin` echoing itself, on both the preflight and the real
+request. The Spaces edge proxy answers `OPTIONS` before it reaches the
+application (the preflight response carries no `server: uvicorn`, and it echoes
+the requested method instead of the configured `GET, POST`) and adds a
+permissive header to the response on the way out. Locally the same request is
+rejected with `400` and no CORS header at all, so this is platform behaviour,
+not a bug in the app.
+
+What this does and does not mean. CORS is enforced by the *browser* and protects
+*users*, not servers — `curl` never consulted it in the first place. This API has
+no authentication and returns no user data, so there is no session to ride and
+nothing to exfiltrate. The practical consequence is narrower: any page on the
+internet can embed this backend and spend its CPU. What actually limits that is
+the rate limiter, not the allowlist.
+
+Keep `ALLOWED_ORIGINS` set anyway. The code is not wrong — the allowlist works as
+written on any host that does not rewrite CORS (Cloud Run, a VPS, local Docker),
+and leaving it correct means the guarantee returns the moment the backend moves.
+Treat it as defence in depth that this particular platform neutralises, and do
+not describe the deployed demo as origin-restricted.
 
 **Frontend — Netlify**
 
